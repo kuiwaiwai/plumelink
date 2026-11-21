@@ -1,0 +1,89 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "mainBinaryName": "PlumeLink",
+  "productName": "羽连 PlumeLink",
+  "version": "0.1.0",
+  "identifier": "com.kuiwaiwai.plumelink",
+  "build": {
+    "beforeDevCommand": "node scripts/build-frontend.mjs && node scripts/licenses.mjs",
+    "beforeBuildCommand": "node scripts/build-frontend.mjs && node scripts/licenses.mjs",
+    "frontendDist": "../tauri-dist/desktop-ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "羽连 PlumeLink",
+        "width": 1120,
+        "height": 780,
+        "minWidth": 480,
+        "minHeight": 420,
+        "decorations": false,
+        "shadow": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "capabilities": [
+        "desktop"
+      ],
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "kuiwaiwai",
+    "targets": [
+      "nsis"
+    ],
+    "shortDescription": "Android 手机安全遥控 Windows 电脑",
+    "copyright": "Copyright 2026 PlumeLink contributors",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "TradChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true,
+        "compression": "zlib",
+        "installerIcon": "icons/installer.ico",
+        "uninstallerIcon": "icons/installer.ico",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "resources": {
+      "../tauri-dist/THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt",
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../PRIVACY.md": "PRIVACY.md",
+      "../README.md": "README.md",
+      "../README.en.md": "README.en.md",
+      "../CONTRIBUTING.md": "CONTRIBUTING.md",
+      "../docs/REMOTE-AUDIO-TRANSFERS.md": "docs/REMOTE-AUDIO-TRANSFERS.md",
+      "../docs/TROUBLESHOOTING.md": "docs/TROUBLESHOOTING.md",
+      "../docs/SECURITY.md": "docs/SECURITY.md",
+      "../docs/INTERFACE.md": "docs/INTERFACE.md",
+      "../docs/assets/logo.png": "docs/assets/logo.png",
+      "../docs/assets/ui/desktop-overview.png": "docs/assets/ui/desktop-overview.png",
+      "../docs/assets/ui/desktop-preferences.png": "docs/assets/ui/desktop-preferences.png",
+      "../docs/assets/ui/desktop-zh-hans.png": "docs/assets/ui/desktop-zh-hans.png",
+      "../docs/assets/ui/desktop-zh-hant.png": "docs/assets/ui/desktop-zh-hant.png",
+      "../docs/assets/ui/desktop-en.png": "docs/assets/ui/desktop-en.png",
+      "../docs/assets/ui/desktop-files.png": "docs/assets/ui/desktop-files.png",
+      "../docs/assets/ui/desktop-devices.png": "docs/assets/ui/desktop-devices.png",
+      "../docs/assets/ui/android-touchpad-landscape.png": "docs/assets/ui/android-touchpad-landscape.png",
+      "../docs/assets/ui/android-dpad-landscape.png": "docs/assets/ui/android-dpad-landscape.png",
+      "../docs/assets/ui/android-touchpad-portrait.png": "docs/assets/ui/android-touchpad-portrait.png",
+      "../docs/assets/ui/android-dpad-portrait.png": "docs/assets/ui/android-dpad-portrait.png"
+    },
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

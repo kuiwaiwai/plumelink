@@ -1,0 +1,19 @@
+[package]
+name = "plumelink-qft-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qfast-transmission = { path = "../QFastTransmission", version = "=0.2.0" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+overflow-checks = true
+
+[workspace]

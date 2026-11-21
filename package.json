@@ -1,0 +1,65 @@
+{
+  "name": "plumelink",
+  "version": "0.1.0",
+  "description": "羽连 PlumeLink — 手机遥控、文件互传与麦克风连接工具",
+  "author": "PlumeLink contributors",
+  "license": "MIT",
+  "private": true,
+  "homepage": "https://github.com/kuiwaiwai/plumelink",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kuiwaiwai/plumelink.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kuiwaiwai/plumelink/issues"
+  },
+  "scripts": {
+    "build:qft": "node scripts/build-qft.mjs",
+    "lint:qft": "node scripts/build-qft.mjs --lint",
+    "pretest": "node scripts/build-qft.mjs",
+    "pretypecheck": "node scripts/build-qft.mjs",
+    "dev": "node scripts/tauri.mjs dev",
+    "start": "node scripts/run-app.mjs",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:rust": "node scripts/cargo.mjs test --locked --lib --tests",
+    "check:rust": "node scripts/cargo.mjs check --locked",
+    "lint:rust": "node scripts/cargo.mjs clippy --locked --all-targets -- -D warnings",
+    "build:ui": "node scripts/build-frontend.mjs --skip-qft",
+    "build:frontend": "node scripts/build-frontend.mjs && node scripts/licenses.mjs",
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/tauri.mjs build --no-bundle",
+    "build:android": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1",
+    "build:android:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Release",
+    "verify:desktop-ui": "node scripts/verify-desktop-ui.mjs",
+    "verify:public-source": "node scripts/verify-public-source.mjs",
+    "pack": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack.ps1",
+    "verify:windows": "node scripts/verify-mobile-package.mjs",
+    "verify:desktop": "node scripts/verify-desktop.mjs",
+    "verify:regression": "node scripts/verify-regression.mjs",
+    "verify:qft": "npm run build:frontend && node scripts/verify-qft.mjs",
+    "verify:concurrency": "npm run build:frontend && node scripts/verify-qft.mjs --mixed",
+    "verify:mobile": "npm run build:frontend && node scripts/verify-mobile-ui.mjs"
+  },
+  "dependencies": {
+    "@lucide/vue": "1.45.0",
+    "@tauri-apps/api": "2.11.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "^22.19.0",
+    "@types/qrcode": "^1.5.6",
+    "@vitejs/plugin-vue": "6.0.9",
+    "qrcode": "^1.5.4",
+    "typescript": "~5.9.3",
+    "vite": "8.3.6",
+    "vitest": "4.1.12",
+    "vue": "3.5.42",
+    "vue-tsc": "^3.2.5"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

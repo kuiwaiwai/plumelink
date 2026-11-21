@@ -1,0 +1,640 @@
+[
+  {
+    "name": "motion",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "motion",
+        "dx": 500,
+        "dy": -500,
+        "scroll": 600
+      }
+    }
+  },
+  {
+    "name": "motion-limit",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "motion",
+        "dx": 0,
+        "dy": 0,
+        "scroll": 601
+      }
+    }
+  },
+  {
+    "name": "motion-incomplete",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "motion",
+        "dx": 0,
+        "dy": 0
+      }
+    }
+  },
+  {
+    "name": "auth",
+    "valid": true,
+    "message": {
+      "kind": "auth",
+      "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "bad-token",
+    "valid": false,
+    "message": {
+      "kind": "auth",
+      "token": "secret"
+    }
+  },
+  {
+    "name": "ping",
+    "valid": true,
+    "message": {
+      "kind": "ping"
+    }
+  },
+  {
+    "name": "ping-extra",
+    "valid": false,
+    "message": {
+      "kind": "ping",
+      "extra": true
+    }
+  },
+  {
+    "name": "move",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "move",
+        "dx": -500,
+        "dy": 500
+      }
+    }
+  },
+  {
+    "name": "move-limit",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "move",
+        "dx": 501,
+        "dy": 0
+      }
+    }
+  },
+  {
+    "name": "move-fraction",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "move",
+        "dx": 0.1,
+        "dy": 0
+      }
+    }
+  },
+  {
+    "name": "click",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "click",
+        "button": "right",
+        "count": 2
+      }
+    }
+  },
+  {
+    "name": "button-down",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "buttonstate",
+        "button": "left",
+        "down": true
+      }
+    }
+  },
+  {
+    "name": "button-state-invalid",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "buttonstate",
+        "button": "x1",
+        "down": true
+      }
+    }
+  },
+  {
+    "name": "scroll",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "scroll",
+        "dy": 600
+      }
+    }
+  },
+  {
+    "name": "key",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "key",
+        "key": "escape"
+      }
+    }
+  },
+  {
+    "name": "volume",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "volume",
+        "action": "mute"
+      }
+    }
+  },
+  {
+    "name": "switch",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "switch",
+        "action": "previous"
+      }
+    }
+  },
+  {
+    "name": "desktop",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "desktop"
+      }
+    }
+  },
+  {
+    "name": "taskview",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "taskview"
+      }
+    }
+  },
+  {
+    "name": "appswitch-left",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "appswitch",
+        "direction": "left"
+      }
+    }
+  },
+  {
+    "name": "virtualdesktop-right",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "virtualdesktop",
+        "direction": "right"
+      }
+    }
+  },
+  {
+    "name": "notifications",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "notifications"
+      }
+    }
+  },
+  {
+    "name": "zoom-in",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "zoom",
+        "direction": "in"
+      }
+    }
+  },
+  {
+    "name": "zoom-direction-invalid",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "zoom",
+        "direction": "sideways"
+      }
+    }
+  },
+  {
+    "name": "appswitch-extra",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "appswitch",
+        "direction": "left",
+        "key": "win"
+      }
+    }
+  },
+  {
+    "name": "text",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "text",
+        "text": "中文 English 😀\n第二行\t"
+      }
+    }
+  },
+  {
+    "name": "text-control",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "text",
+        "text": "\u0000"
+      }
+    }
+  },
+  {
+    "name": "empty-text",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "text",
+        "text": ""
+      }
+    }
+  },
+  {
+    "name": "release",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2147483647,
+      "command": {
+        "type": "release"
+      }
+    }
+  },
+  {
+    "name": "release-extra",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "release",
+        "extra": 1
+      }
+    }
+  },
+  {
+    "name": "desktop-extra",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "desktop",
+        "shell": "calc"
+      }
+    }
+  },
+  {
+    "name": "unknown-command",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "probe"
+      }
+    }
+  },
+  {
+    "name": "id-negative",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": -1,
+      "command": {
+        "type": "release"
+      }
+    }
+  },
+  {
+    "name": "id-unsafe",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 9007199254740992,
+      "command": {
+        "type": "release"
+      }
+    }
+  },
+  {
+    "name": "envelope-extra",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "release"
+      },
+      "extra": true
+    }
+  },
+  {
+    "name": "backspace",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "key",
+        "key": "backspace"
+      }
+    }
+  },
+  {
+    "name": "not-win-key",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "key",
+        "key": "win"
+      }
+    }
+  },
+  {
+    "name": "key-delete",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "key",
+        "key": "delete"
+      }
+    }
+  },
+  {
+    "name": "magnifier",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "magnifier",
+        "enabled": true
+      }
+    }
+  },
+  {
+    "name": "magnifier-off",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "magnifier",
+        "enabled": false
+      }
+    }
+  },
+  {
+    "name": "magnifier-invalid",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "magnifier",
+        "enabled": 1
+      }
+    }
+  },
+  {
+    "name": "shutdown-confirmed",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "shutdown",
+        "confirmed": true
+      }
+    }
+  },
+  {
+    "name": "shutdown-unconfirmed",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "shutdown",
+        "confirmed": false
+      }
+    }
+  },
+  {
+    "name": "shutdown-missing-confirmation",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "shutdown"
+      }
+    }
+  },
+  {
+    "name": "shutdown-force-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 2,
+      "command": {
+        "type": "shutdown",
+        "confirmed": true,
+        "force": true
+      }
+    }
+  },
+  {
+    "name": "plumelink-rejects-empty-token",
+    "valid": false,
+    "message": {
+      "kind": "auth",
+      "token": ""
+    }
+  },
+  {
+    "name": "qft-open",
+    "valid": true,
+    "message": {
+      "kind": "qftOpen"
+    }
+  },
+  {
+    "name": "legacy-command-rejected",
+    "valid": false,
+    "message": {
+      "kind": "command",
+      "id": 1,
+      "command": {
+        "type": "release"
+      }
+    }
+  },
+  {
+    "name": "legacy-off-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftOff"
+    }
+  },
+  {
+    "name": "click-middle",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 3,
+      "command": {
+        "type": "click",
+        "button": "middle",
+        "count": 1
+      }
+    }
+  },
+  {
+    "name": "scroll-horizontal",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 4,
+      "command": {
+        "type": "scroll",
+        "dx": -120,
+        "dy": 0
+      }
+    }
+  },
+  {
+    "name": "key-extended-tab",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 5,
+      "command": {
+        "type": "key",
+        "key": "tab"
+      }
+    }
+  },
+  {
+    "name": "combo-ctrl-c",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 6,
+      "command": {
+        "type": "combo",
+        "modifiers": ["ctrl"],
+        "key": "c"
+      }
+    }
+  },
+  {
+    "name": "combo-duplicate-modifiers-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 7,
+      "command": {
+        "type": "combo",
+        "modifiers": ["ctrl", "ctrl"],
+        "key": "c"
+      }
+    }
+  },
+  {
+    "name": "combo-empty-modifiers-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 8,
+      "command": {
+        "type": "combo",
+        "modifiers": [],
+        "key": "c"
+      }
+    }
+  }
+]

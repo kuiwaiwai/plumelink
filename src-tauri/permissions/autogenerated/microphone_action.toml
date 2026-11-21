@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-microphone-action"
+description = "Enables the microphone_action command without any pre-configured scope."
+commands.allow = ["microphone_action"]
+
+[[permission]]
+identifier = "deny-microphone-action"
+description = "Denies the microphone_action command without any pre-configured scope."
+commands.deny = ["microphone_action"]
