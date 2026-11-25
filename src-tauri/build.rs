@@ -13,10 +13,13 @@ fn main() {
             "desktop_action",
             "set_service_port",
             "transfer_action",
+            "receive_action",
+            "application_action",
             "device_action",
             "admin_action",
             "diagnostic_action",
             "microphone_action",
+            "usb_action",
         ]),
     ))
     .expect("Tauri build configuration failed");

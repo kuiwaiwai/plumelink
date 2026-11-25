@@ -28,6 +28,7 @@ final class PinnedWebViewClient extends WebViewClient {
         boolean isActiveWebView(WebView view);
         void onBindIdentity(String url, String host, String stableId, String pin);
         void onReturnToConnect(String url, String message);
+        default void onVerifyComputer(String url) { onReturnToConnect(url, ""); }
         void onRenderProcessCrashed(String recoverUrl);
         AlertDialog showSecurityDialog(AlertDialog.Builder builder);
         void runOnMain(Runnable task);
@@ -37,9 +38,24 @@ final class PinnedWebViewClient extends WebViewClient {
     private final ComputerStore store;
     private final Host host;
 
-    private AlertDialog activeSslDialog;
-    private volatile String activeSslKey = "";
-    private final List<SslErrorHandler> pendingSslHandlers = new ArrayList<>();
+    static final class SslPrompt {
+        final WebView source;
+        final String baseUrl, expectedHost, stableId, pin;
+        final boolean awaitingTrust;
+        final List<SslErrorHandler> handlers = new ArrayList<>();
+        AlertDialog dialog;
+
+        SslPrompt(WebView source, String baseUrl, String expectedHost, String stableId, String pin, boolean awaitingTrust) {
+            this.source = source;
+            this.baseUrl = baseUrl;
+            this.expectedHost = expectedHost;
+            this.stableId = stableId;
+            this.pin = pin;
+            this.awaitingTrust = awaitingTrust;
+        }
+    }
+
+    private volatile SslPrompt activePrompt;
 
     PinnedWebViewClient(Context context, ComputerStore store, Host host) {
         this.context = context;
@@ -49,18 +65,49 @@ final class PinnedWebViewClient extends WebViewClient {
 
     private String ui(int id) { return AppLanguage.text(context, id); }
 
-    boolean isAwaitingTrust() { return !activeSslKey.isEmpty(); }
+    boolean isAwaitingTrust() {
+        SslPrompt prompt = activePrompt;
+        return prompt != null && prompt.awaitingTrust;
+    }
 
     void clearPrompt() {
-        for (SslErrorHandler pending : pendingSslHandlers) {
+        SslPrompt previous = activePrompt;
+        activePrompt = null;
+        if (previous == null) return;
+        for (SslErrorHandler pending : previous.handlers) {
             try { pending.cancel(); } catch (Exception ignored) {}
         }
-        pendingSslHandlers.clear();
-        activeSslKey = "";
-        if (activeSslDialog != null) {
-            try { activeSslDialog.dismiss(); } catch (Exception ignored) {}
-            activeSslDialog = null;
+        previous.handlers.clear();
+        if (previous.dialog != null) {
+            try { previous.dialog.dismiss(); } catch (Exception ignored) {}
         }
+    }
+
+    SslPrompt beginPrompt(WebView source, String baseUrl, String expectedHost, String stableId, String pin, boolean awaitingTrust) {
+        clearPrompt();
+        SslPrompt prompt = new SslPrompt(source, baseUrl, expectedHost, stableId, pin, awaitingTrust);
+        activePrompt = prompt;
+        return prompt;
+    }
+
+    private boolean ownsPrompt(SslPrompt prompt) {
+        return activePrompt == prompt && host.isActiveWebView(prompt.source);
+    }
+
+    void trustPrompt(SslPrompt prompt) {
+        if (!ownsPrompt(prompt) || !prompt.awaitingTrust) return;
+        activePrompt = null;
+        host.onBindIdentity(prompt.baseUrl, prompt.expectedHost, prompt.stableId, prompt.pin);
+        for (SslErrorHandler pending : prompt.handlers) {
+            try { pending.proceed(); } catch (Exception ignored) {}
+        }
+        prompt.handlers.clear();
+    }
+
+    void returnFromPrompt(SslPrompt prompt, String message) {
+        if (!ownsPrompt(prompt)) return;
+        clearPrompt();
+        if (host.isActiveWebView(prompt.source)) host.onReturnToConnect(prompt.baseUrl, message);
     }
 
     private static int httpsPort(Uri uri) {
@@ -135,7 +182,9 @@ final class PinnedWebViewClient extends WebViewClient {
     public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         if (!host.isActiveWebView(view)) return true;
         String recoverUrl = host.currentBaseUrl();
-        host.runOnMain(() -> host.onRenderProcessCrashed(recoverUrl));
+        host.runOnMain(() -> {
+            if (host.isActiveWebView(view)) host.onRenderProcessCrashed(recoverUrl);
+        });
         return true;
     }
 
@@ -168,44 +217,25 @@ final class PinnedWebViewClient extends WebViewClient {
         }
         if (!saved.isEmpty()) {
             handler.cancel();
-            clearPrompt();
-            activeSslDialog = host.showSecurityDialog(AppAppearance.dialog(context)
-                .setTitle(ui(R.string.ui_certificate_changed))
-                .setMessage(ui(R.string.ui_the_certificate_differs_from_the_trusted_record_connect) + current)
-                .setPositiveButton(ui(R.string.ui_back_to_pcs), (dialog, which) ->
-                    host.onReturnToConnect(baseUrl, ui(R.string.ui_certificate_changed_the_new_certificate_was_not_trusted)))
-            );
+            host.onVerifyComputer(baseUrl);
             return;
         }
-        String sslKey = baseUrl + "|" + current;
-        if (activeSslDialog != null && activeSslDialog.isShowing()) {
-            if (sslKey.equals(activeSslKey)) pendingSslHandlers.add(handler);
+        SslPrompt previous = activePrompt;
+        if (previous != null && previous.dialog != null && previous.dialog.isShowing()) {
+            if (previous.source == view && previous.awaitingTrust && baseUrl.equals(previous.baseUrl) && current.equals(previous.pin)) previous.handlers.add(handler);
             else handler.cancel();
             return;
         }
-        activeSslKey = sslKey;
-        pendingSslHandlers.clear();
-        pendingSslHandlers.add(handler);
-        activeSslDialog = host.showSecurityDialog(AppAppearance.dialog(context)
+        SslPrompt prompt = beginPrompt(view, baseUrl, expected, stableId, current, true);
+        prompt.handlers.add(handler);
+        prompt.dialog = host.showSecurityDialog(AppAppearance.dialog(context)
             .setTitle(ui(R.string.ui_trust_this_pc))
             .setMessage(ui(R.string.ui_verify_that_this_address_matches_your_pc) + expected + ui(R.string.ui_sha_256_certificate_fingerprint) + current)
-            .setNegativeButton(ui(R.string.ui_cancel), (dialog, which) -> {
-                clearPrompt();
-                host.onReturnToConnect(baseUrl, ui(R.string.ui_trust_canceled_choose_another_pc));
-            })
-            .setPositiveButton(ui(R.string.ui_trust_and_connect), (dialog, which) -> {
-                host.onBindIdentity(baseUrl, expected, stableId, current);
-                for (SslErrorHandler pending : pendingSslHandlers) {
-                    try { pending.proceed(); } catch (Exception ignored) {}
-                }
-                pendingSslHandlers.clear();
-                activeSslKey = "";
-                activeSslDialog = null;
-            })
-            .setOnCancelListener(dialog -> {
-                clearPrompt();
-                host.onReturnToConnect(baseUrl, ui(R.string.ui_trust_canceled_choose_another_pc));
-            })
+            .setNegativeButton(ui(R.string.ui_cancel), (dialog, which) ->
+                returnFromPrompt(prompt, ui(R.string.ui_trust_canceled_choose_another_pc)))
+            .setPositiveButton(ui(R.string.ui_trust_and_connect), (dialog, which) -> trustPrompt(prompt))
+            .setOnCancelListener(dialog ->
+                returnFromPrompt(prompt, ui(R.string.ui_trust_canceled_choose_another_pc)))
         );
     }
 }

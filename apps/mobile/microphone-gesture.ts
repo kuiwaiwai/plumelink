@@ -90,13 +90,16 @@ export class MicrophoneGesture {
       this.emit("stop");
     }
   }
-  cancel() {
-    const active = this.mode !== "idle";
+  reset() {
     this.mode = "idle";
     this.pressed = false;
     this.intent = null;
     this.progress = 0;
     this.dwell = null;
+  }
+  cancel() {
+    const active = this.mode !== "idle";
+    this.reset();
     if (active) this.emit("stop");
   }
 }

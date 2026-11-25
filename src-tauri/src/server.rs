@@ -1,6 +1,7 @@
 mod audio;
 mod files;
 mod input;
+mod usb_access;
 use audio::upgrade_microphone;
 use files::{resumable_upload, send_file};
 use input::upgrade;
@@ -38,6 +39,7 @@ use tokio::{
 };
 
 struct Session {
+    standby: bool,
     cancel: watch::Sender<u16>,
     device_id: String,
 }
@@ -51,9 +53,16 @@ struct ControlRequest {
     name: String,
     created: Instant,
 }
+#[derive(Clone)]
 pub struct Context {
     pub origin: String,
     mdns_host: Option<String>,
+    shutdown: watch::Receiver<bool>,
+    shared: Arc<SharedContext>,
+    usb_access: Option<usb_access::UsbAccess>,
+}
+pub struct SharedContext {
+    shutdown: watch::Receiver<bool>,
     pairing: Mutex<Pairing>,
     limits: Mutex<Limits>,
     active: Mutex<HashMap<u64, Session>>,
@@ -65,14 +74,35 @@ pub struct Context {
     download_slots: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     audio_slots: Arc<Semaphore>,
-    shutdown: watch::Receiver<bool>,
+    connection_slots: Arc<Semaphore>,
+    application_slots: Arc<Semaphore>,
+    application_icon_slots: Arc<Semaphore>,
     control_request: Mutex<Option<ControlRequest>>,
     recent_control: Mutex<Option<(String, Instant)>>,
     uploads: crate::resumable::Uploads,
 }
+impl std::ops::Deref for Context {
+    type Target = SharedContext;
+    fn deref(&self) -> &Self::Target { &self.shared }
+}
 impl Context {
+    fn stopped(&self) -> bool { *self.shutdown.borrow() || *self.shared.shutdown.borrow() }
+    fn while_live<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let local = self.shutdown.borrow(); let global = self.shared.shutdown.borrow();
+        if *local || *global { None } else { Some(operation()) }
+    }
+    fn stop_signal(&self) -> ConnectionStop {
+        ConnectionStop { local: self.shutdown.clone(), global: self.shared.shutdown.clone() }
+    }
+    fn window_access(&self, token: &str) -> Result<(), String> {
+        if self.stopped() { return Err("连接已失效".into()); }
+        let device = self.pairing.lock().unwrap().device(token).ok_or("配对已失效，请重新配对")?;
+        if !device.permissions.input { return Err("此设备没有遥控权限".into()); }
+        if !self.store.lock().unwrap().primary_allows(&device.id) { return Err("当前无主控权".into()); }
+        Ok(())
+    }
     fn files_allowed(&self, token: &str) -> bool {
-        !*self.shutdown.borrow()
+        !self.stopped()
             && self
                 .pairing
                 .lock()
@@ -303,22 +333,51 @@ impl Context {
     fn authorize(
         &self,
         token: &str,
-    ) -> Option<(u64, watch::Receiver<u16>, crate::security::AuthorizedDevice)> {
+    ) -> Result<(u64, watch::Receiver<u16>, crate::security::AuthorizedDevice), u16> {
+        let local = self.shutdown.borrow(); let global = self.shared.shutdown.borrow();
+        if *local || *global { return Err(4000); }
         let pairing = self.pairing.lock().unwrap();
-        let device = pairing.device(token)?;
+        let device = pairing.device(token).ok_or(4003u16)?;
         pairing.mark_seen(&device.id);
         drop(pairing);
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = watch::channel(0);
-        self.controller.activate(id);
-        self.active.lock().unwrap().insert(
-            id,
-            Session {
-                cancel: tx,
-                device_id: device.id.clone(),
-            },
-        );
-        Some((id, rx, device))
+        if !self.controller.activate(id) { return Err(4004); }
+        let previous = {
+            let mut active = self.active.lock().unwrap();
+            if active.iter().any(|(other, session)| *other > id && session.standby && session.device_id == device.id) {
+                drop(active);
+                self.controller.release_for(id);
+                return Err(4001);
+            }
+            let ids: Vec<_> = active.iter().filter(|(other, session)| **other < id && session.standby && session.device_id == device.id)
+                .map(|(id, _)| *id).collect();
+            let previous: Vec<_> = ids.into_iter().filter_map(|id| active.remove(&id).map(|session| (id, session))).collect();
+            active.insert(id, Session { standby: false, cancel: tx, device_id: device.id.clone() });
+            previous
+        };
+        for (previous_id, session) in previous {
+            let _ = session.cancel.send(4001);
+            self.controller.release_for(previous_id);
+        }
+        Ok((id, rx, device))
+    }
+    fn enter_standby(&self, id: u64, device_id: &str) -> bool {
+        let previous = {
+            let mut active = self.active.lock().unwrap();
+            if !active.contains_key(&id) || active.iter().any(|(other, session)| *other > id && session.device_id == device_id) {
+                return false;
+            }
+            if let Some(session) = active.get_mut(&id) { session.standby = true; }
+            let ids: Vec<_> = active.iter().filter(|(other, session)| **other != id && session.device_id == device_id)
+                .map(|(other, _)| *other).collect();
+            ids.into_iter().filter_map(|other| active.remove(&other).map(|session| (other, session))).collect::<Vec<_>>()
+        };
+        for (previous_id, session) in previous {
+            let _ = session.cancel.send(4001);
+            self.controller.release_for(previous_id);
+        }
+        true
     }
     fn detach(&self, id: u64) {
         if self.active.lock().unwrap().remove(&id).is_some() {
@@ -329,13 +388,20 @@ impl Context {
         self.active.lock().unwrap().contains_key(&id)
     }
     fn host_ok(&self, headers: &HeaderMap) -> bool {
-        header_host_ok(&self.origin, self.mdns_host.as_deref(), headers)
+        !self.stopped() && header_host_ok(&self.origin, self.mdns_host.as_deref(), headers)
     }
     fn origin_ok(&self, headers: &HeaderMap) -> bool {
-        header_origin_ok(&self.origin, self.mdns_host.as_deref(), headers)
+        !self.stopped() && header_origin_ok(&self.origin, self.mdns_host.as_deref(), headers)
     }
     fn api_origin_ok(&self, headers: &HeaderMap) -> bool {
-        header_api_origin_ok(&self.origin, self.mdns_host.as_deref(), headers)
+        !self.stopped() && header_api_origin_ok(&self.origin, self.mdns_host.as_deref(), headers)
+    }
+}
+struct ConnectionStop { local: watch::Receiver<bool>, global: watch::Receiver<bool> }
+impl ConnectionStop {
+    async fn changed(&mut self) {
+        if *self.local.borrow() || *self.global.borrow() { return; }
+        tokio::select! { _ = self.local.changed() => {}, _ = self.global.changed() => {} }
     }
 }
 fn allowed_host(origin: &str, mdns_host: Option<&str>, candidate: &str) -> bool {
@@ -410,9 +476,79 @@ pub struct Server {
     pub context: Arc<Context>,
     pub address: SocketAddr,
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    lan: Option<ServingEndpoint>,
+    usb: HashMap<String,ServingEndpoint>,
+    tls: Option<Arc<rustls::ServerConfig>>,
     discovery: Option<Discovery>,
     discovery_error: Option<String>,
+}
+struct ServingEndpoint {
+    address: SocketAddr,
+    stop: watch::Sender<bool>,
+    task: Option<JoinHandle<()>>,
+    usb_access: Option<usb_access::UsbAccess>,
+}
+impl ServingEndpoint {
+    fn start(listener: tokio::net::TcpListener, tls: Option<Arc<rustls::ServerConfig>>, context: &Context, mdns: bool, usb_access:Option<usb_access::UsbAccess>) -> Self {
+        let address = listener.local_addr().expect("bound listener address");
+        let (stop, shutdown) = watch::channel(false);
+        let view = Arc::new(Context {
+            origin: format!("{}://{address}", if tls.is_some() { "https" } else { "http" }),
+            mdns_host: if mdns { mdns_host_for(&context.store, address.port()) } else { None },
+            shutdown: shutdown.clone(), shared: context.shared.clone(),
+            usb_access: usb_access.clone(),
+        });
+        let routes = Router::new().route("/ws", get(upgrade)).route("/microphone", get(upgrade_microphone))
+            .fallback(http).layer(axum::middleware::from_fn_with_state(view.clone(),usb_access::guard)).with_state(view);
+        let mut shutdown = shutdown;
+        let connections=context.connection_slots.clone();
+        let task = tokio::spawn(async move {
+            if let Some(tls) = tls {
+                let listener=crate::transport::CancelListener::new(crate::transport::TlsListener::with_slots(listener,tls,connections),shutdown.clone());
+                let _ = axum::serve(listener,
+                    routes.into_make_service_with_connect_info::<crate::transport::Peer>())
+                    .with_graceful_shutdown(async move { let _ = shutdown.changed().await; }).await;
+            } else {
+                let listener=crate::transport::CancelListener::new(crate::transport::LimitedListener::with_slots(listener,connections),shutdown.clone());
+                let _ = axum::serve(listener,
+                    routes.into_make_service_with_connect_info::<crate::transport::Peer>())
+                    .with_graceful_shutdown(async move { let _ = shutdown.changed().await; }).await;
+            }
+        });
+        Self { address, stop, task: Some(task), usb_access }
+    }
+    async fn close(mut self) {
+        let _ = self.stop.send(true);
+        if let Some(mut task) = self.task.take() {
+            if tokio::time::timeout(Duration::from_secs(3), &mut task).await.is_err() {
+                task.abort(); let _ = task.await;
+            }
+        }
+    }
+}
+impl Drop for ServingEndpoint {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+        if let Some(task) = self.task.take() { task.abort(); }
+    }
+}
+fn claim_usb_port(port:u16)->bool {
+    static HISTORY:Mutex<[u64;1024]>=Mutex::new([0;1024]);
+    let mut history=HISTORY.lock().unwrap();let word=usize::from(port)/64;let bit=1u64<<(port%64);
+    if history[word]&bit!=0 {false}else{history[word]|=bit;true}
+}
+async fn fresh_usb_listener(mut initial:Option<tokio::net::TcpListener>)->Result<tokio::net::TcpListener,String> {
+    const FAILURE:&str="暂时无法创建 USB 入口，请重启电脑端羽连后重试";
+    for _ in 0..64 {
+        if let Some(listener)=initial.take() {
+            if claim_usb_port(listener.local_addr().map_err(|_|FAILURE)?.port()) {return Ok(listener);}
+        }else{
+            let socket=tokio::net::TcpSocket::new_v4().map_err(|_|FAILURE)?;
+            socket.bind((std::net::Ipv4Addr::LOCALHOST,0).into()).map_err(|_|FAILURE)?;
+            if claim_usb_port(socket.local_addr().map_err(|_|FAILURE)?.port()) {return socket.listen(1024).map_err(|_|FAILURE.into());}
+        }
+    }
+    Err(FAILURE.into())
 }
 impl Server {
     pub async fn start(
@@ -456,6 +592,14 @@ impl Server {
     ) -> Result<Self, String> {
         Self::start_inner(host, port, controller, store, files, true).await
     }
+    pub async fn start_usb_only(controller: Arc<Controller>, store: crate::preferences::SharedStore, files: Arc<FileHub>) -> Result<Self, String> {
+        let mut prepared=Self::prepare(std::net::Ipv4Addr::LOCALHOST,0,&store,true).await?;
+        prepared.listener=fresh_usb_listener(Some(prepared.listener)).await?;
+        prepared.address=prepared.listener.local_addr().map_err(|error|error.to_string())?;
+        let mut server=Self::launch_with_access(prepared,controller,store,files,Some(usb_access::UsbAccess::new()?));
+        if let Some(endpoint)=server.lan.take() {server.usb.insert(String::new(),endpoint);}
+        Ok(server)
+    }
     async fn start_inner(
         host: std::net::Ipv4Addr,
         port: u16,
@@ -496,6 +640,14 @@ impl Server {
         store: &crate::preferences::SharedStore,
         secure: bool,
     ) -> Result<PreparedServer, String> {
+        {
+            let mut preferences = store.lock().unwrap();
+            if preferences.get().installation_id.is_empty() {
+                let mut identifier = [0_u8; 12];
+                getrandom::fill(&mut identifier).map_err(|error| error.to_string())?;
+                preferences.update(|settings| settings.installation_id = hex::encode(identifier))?;
+            }
+        }
         let listener = Self::bind(host, port).await?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         let tls = if secure {
@@ -517,6 +669,13 @@ impl Server {
         controller: Arc<Controller>,
         store: crate::preferences::SharedStore,
         files: Arc<FileHub>,
+    ) -> Self { Self::launch_with_access(prepared,controller,store,files,None) }
+    fn launch_with_access(
+        prepared: PreparedServer,
+        controller: Arc<Controller>,
+        store: crate::preferences::SharedStore,
+        files: Arc<FileHub>,
+        usb_access: Option<usb_access::UsbAccess>,
     ) -> Self {
         let PreparedServer {
             host,
@@ -530,6 +689,10 @@ impl Server {
         let context = Arc::new(Context {
             origin: format!("{}://{address}", if tls.is_some() { "https" } else { "http" }),
             mdns_host,
+            shutdown: rx.clone(),
+            usb_access: usb_access.clone(),
+            shared: Arc::new(SharedContext {
+            shutdown: rx.clone(),
             pairing: Mutex::new(pairing),
             limits: Mutex::new(Limits {
                 pair: Limiter::new(6, 60),
@@ -539,16 +702,19 @@ impl Server {
             active: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             controller,
-            files,
+            files: files.clone(),
             store: store.clone(),
             file_slots: Arc::new(Semaphore::new(1)),
             download_slots: Arc::new(Semaphore::new(4)),
             slots: Arc::new(Semaphore::new(8)),
             audio_slots: Arc::new(Semaphore::new(2)),
-            shutdown: rx.clone(),
+            connection_slots: Arc::new(Semaphore::new(64)),
+            application_slots: Arc::new(Semaphore::new(1)),
+            application_icon_slots: Arc::new(Semaphore::new(1)),
             control_request: Mutex::new(None),
             recent_control: Mutex::new(None),
-            uploads: crate::resumable::Uploads::default(),
+            uploads: crate::resumable::Uploads::with_history(files.received.clone()),
+            }),
         });
         let cleanup = context.clone();
         let renew = context.clone();
@@ -574,44 +740,75 @@ impl Server {
                 }
             }
         });
-        let (discovery, discovery_error) = match advertise(host, address.port(), &store) {
+        let (discovery, discovery_error) = if host.is_loopback() { (None, None) } else { match advertise(host, address.port(), &store) {
             Ok(daemon) => (Some(daemon), None),
             Err(error) => (None, Some(error)),
-        };
-        let routes = Router::new()
-            .route("/ws", get(upgrade))
-            .route("/microphone", get(upgrade_microphone))
-            .fallback(http)
-            .with_state(context.clone());
-        let mut stop = rx;
-        let task = tokio::spawn(async move {
-            if let Some(config) = tls {
-                let _ = axum::serve(
-                    crate::transport::TlsListener::new(listener, config),
-                    routes.into_make_service_with_connect_info::<crate::transport::Peer>(),
-                )
-                .with_graceful_shutdown(async move {
-                    let _ = stop.changed().await;
-                })
-                .await;
-            } else {
-                let _ = axum::serve(
-                    crate::transport::LimitedListener::new(listener),
-                    routes.into_make_service_with_connect_info::<crate::transport::Peer>(),
-                )
-                .with_graceful_shutdown(async move {
-                    let _ = stop.changed().await;
-                })
-                .await;
-            }
-        });
+        }};
+        let endpoint = ServingEndpoint::start(listener, tls.clone(), &context, !host.is_loopback(),usb_access);
+        let (lan, usb) = (Some(endpoint), HashMap::new());
         Self {
             context,
             address,
             shutdown: tx,
-            task: Some(task),
+            lan, usb, tls,
             discovery,
             discovery_error,
+        }
+    }
+    pub fn usb_address(&self) -> Option<SocketAddr> { self.usb.values().map(|e|e.address).min() }
+    pub fn usb_address_for(&self,id:&str)->Option<SocketAddr> {self.usb.get(id).map(|e|e.address)}
+    pub fn usb_access_for(&self,id:&str)->Option<&str> {self.usb.get(id)?.usb_access.as_ref().map(usb_access::UsbAccess::key)}
+    pub fn usb_addresses(&self)->Vec<SocketAddr> {let mut addresses:Vec<_>=self.usb.values().map(|e|e.address).collect();addresses.sort();addresses}
+    pub fn lan_address(&self) -> Option<SocketAddr> { self.lan.as_ref().map(|e| e.address) }
+    pub async fn ensure_usb(&mut self) -> Result<SocketAddr, String> {
+        self.ensure_usb_for("").await
+    }
+    pub async fn ensure_usb_for(&mut self,id:&str)->Result<SocketAddr,String> {
+        if let Some(address)=self.usb_address_for(id) {return Ok(address);}
+        if !id.is_empty() {
+            if let Some(endpoint)=self.usb.remove("") {let address=endpoint.address;self.usb.insert(id.to_string(),endpoint);return Ok(address);}
+        }
+        if self.usb.len()>=128 {return Err("连接的 USB 手机过多，请先断开部分手机".into());}
+        let listener=fresh_usb_listener(None).await?;
+        let endpoint = ServingEndpoint::start(listener, self.tls.clone(), &self.context, false,Some(usb_access::UsbAccess::new()?));
+        let address = endpoint.address;
+        self.usb.insert(id.to_string(),endpoint);
+        Ok(address)
+    }
+    pub async fn stop_usb(&mut self) {
+        let endpoints:Vec<_>=self.usb.drain().map(|(_,endpoint)|endpoint).collect();
+        futures_util::future::join_all(endpoints.into_iter().map(ServingEndpoint::close)).await;
+    }
+    pub async fn stop_usb_for(&mut self,id:&str) {
+        if let Some(endpoint)=self.usb.remove(id) {endpoint.close().await;}
+    }
+    pub(crate) async fn retain_usb(&mut self,ids:&[String]) {
+        let keys:Vec<_>=self.usb.keys().filter(|key|!ids.contains(key)).cloned().collect();
+        let endpoints:Vec<_>=keys.into_iter().filter_map(|key|self.usb.remove(&key)).collect();
+        futures_util::future::join_all(endpoints.into_iter().map(ServingEndpoint::close)).await;
+    }
+    pub(crate) async fn rotate_usb_for(&mut self,id:&str) -> Result<SocketAddr,String> {
+        let listener=fresh_usb_listener(None).await?;
+        let endpoint=ServingEndpoint::start(listener,self.tls.clone(),&self.context,false,Some(usb_access::UsbAccess::new()?));
+        let address=endpoint.address;
+        self.stop_usb_for(id).await;self.usb.insert(id.to_string(),endpoint);Ok(address)
+    }
+    pub async fn stop_lan(&mut self) {
+        if let Some(discovery) = self.discovery.take() { discovery.shutdown(); }
+        if let Some(endpoint) = self.lan.take() { endpoint.close().await; }
+    }
+    pub(crate) async fn replace_lan(&mut self, listener: tokio::net::TcpListener) {
+        let address = listener.local_addr().expect("bound LAN listener");
+        let endpoint = ServingEndpoint::start(listener, self.tls.clone(), &self.context, true,None);
+        self.stop_lan().await;
+        self.lan = Some(endpoint); self.address = address;
+        self.context = Arc::new(Context { origin: format!("{}://{address}", if self.tls.is_some() { "https" } else { "http" }),
+            mdns_host: mdns_host_for(&self.context.store, address.port()), usb_access:None, ..(*self.context).clone() });
+        if let std::net::IpAddr::V4(host) = address.ip() {
+            match advertise(host, address.port(), &self.context.store) {
+                Ok(discovery) => { self.discovery = Some(discovery); self.discovery_error = None; },
+                Err(error) => self.discovery_error = Some(error),
+            }
         }
     }
     pub fn discovery_active(&self) -> bool {
@@ -626,25 +823,17 @@ impl Server {
         }
     }
     pub async fn stop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(endpoint)=&self.lan {let _=endpoint.stop.send(true);}
+        for endpoint in self.usb.values() {let _=endpoint.stop.send(true);}
         self.context.controller.audio.stop();
         // Stop the active session without forgetting trusted credentials.
         for (_, session) in self.context.active.lock().unwrap().drain() {
             let _ = session.cancel.send(4000);
         }
         self.context.controller.revoke();
-        if let Some(discovery) = self.discovery.take() {
-            discovery.shutdown();
-        }
-        let _ = self.shutdown.send(true);
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout(Duration::from_secs(3), &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
-        }
+        self.stop_lan().await;
+        self.stop_usb().await;
     }
 }
 
@@ -704,9 +893,7 @@ impl Drop for Server {
         if let Some(discovery) = self.discovery.take() {
             discovery.shutdown();
         }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.lan.take(); self.usb.clear();
     }
 }
 fn mdns_host_for(store: &crate::preferences::SharedStore, port: u16) -> Option<String> {
@@ -773,6 +960,13 @@ async fn http(
         if !ctx.api_origin_ok(request.headers()) {
             return error(StatusCode::FORBIDDEN, "来源不匹配");
         }
+        if path == "/api/identity" && method == Method::GET {
+            let mut identity=serde_json::json!({
+                "service": "plumelink", "version": 1, "id": ctx.store.lock().unwrap().get().installation_id
+            });
+            if let Some(access)=&ctx.usb_access {identity["usbSession"]=access.tag.clone().into();}
+            return json(StatusCode::OK,identity);
+        }
         if path == "/api/pair" && method == Method::POST {
             {
                 let mut limits = ctx.limits.lock().unwrap();
@@ -810,28 +1004,29 @@ async fn http(
                 Ok(b) => b,
                 Err(_) => return error(StatusCode::BAD_REQUEST, "请求无效"),
             };
-            let mut pairing = ctx.pairing.lock().unwrap();
-            return match pairing.pair_device(
-                &body.code,
-                body.device_id.as_deref(),
-                &body.device_name,
-            ) {
-                Ok(Some(result)) => json(
+            let attempt=ctx.while_live(||{
+                let mut pairing=ctx.pairing.lock().unwrap();
+                let result=pairing.pair_device(&body.code,body.device_id.as_deref(),&body.device_name);
+                (result,pairing.expired())
+            });
+            return match attempt {
+                Some((Ok(Some(result)),_)) => json(
                     StatusCode::OK,
                     serde_json::json!({"token":result.token,"deviceId":result.device_id}),
                 ),
-                Ok(None) => error(
+                Some((Ok(None),expired)) => error(
                     StatusCode::UNAUTHORIZED,
-                    if pairing.expired() {
+                    if expired {
                         "配对码已过期，请在电脑端重新配对"
                     } else {
                         "配对码不正确，请核对电脑上显示的 6 位数字"
                     },
                 ),
-                Err(_) => error(
+                Some((Err(_),_)) => error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "随机数生成失败，服务拒绝配对",
                 ),
+                None=>error(StatusCode::SERVICE_UNAVAILABLE,"连接已失效"),
             };
         }
         let token = request
@@ -848,6 +1043,22 @@ async fn http(
                 StatusCode::OK,
                 serde_json::json!({"connected":ctx.connected(),"connectedCount":ctx.connected_count(),"deviceId":device.id,"deviceName":device.name,"permissions":device.permissions}),
             )
+        } else if path == "/api/device/name" && method == Method::POST {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct DeviceName { name: String, #[serde(default)] model: String }
+            let credential = token.to_owned();
+            let bytes = match tokio::time::timeout(Duration::from_secs(5), to_bytes(request.into_body(), 1024)).await {
+                Ok(Ok(bytes)) => bytes,
+                _ => return error(StatusCode::BAD_REQUEST, "请求过大或读取超时"),
+            };
+            let Ok(body) = serde_json::from_slice::<DeviceName>(&bytes) else { return error(StatusCode::BAD_REQUEST, "请求无效"); };
+            let pairing = ctx.pairing.lock().unwrap();
+            let Some(device) = pairing.device(&credential) else { return error(StatusCode::UNAUTHORIZED, "需要配对"); };
+            match pairing.report_name(&device.id, &body.name, &body.model) {
+                Ok(name) => json(StatusCode::OK, serde_json::json!({"deviceName":name})),
+                Err(message) => error(StatusCode::BAD_REQUEST, &message),
+            }
         } else if path == "/api/control/request" && method == Method::POST {
             if !device.permissions.input {
                 return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
@@ -857,11 +1068,16 @@ async fn http(
             }
             json(StatusCode::OK, serde_json::json!({"requested":true}))
         } else if path == "/api/microphone/status" && method == Method::GET {
+            if !device.permissions.microphone {
+                return error(StatusCode::FORBIDDEN, "此设备没有麦克风权限");
+            }
             let settings = ctx.store.lock().unwrap().get();
+            let current = ctx.controller.audio.device_status(&device.id);
             json(
                 StatusCode::OK,
                 serde_json::json!({"configured":!settings.audio_output.is_empty(),"output":settings.audio_output_name,
-                "allowed":device.permissions.microphone,"status":ctx.controller.audio.status()}),
+                "allowed":true,"gainDb":settings.microphone_gain_db,
+                "owned":current.owned,"busy":current.busy,"status":current.status}),
             )
         } else if path == "/api/files" && method == Method::GET {
             if !device.permissions.files {
@@ -877,6 +1093,38 @@ async fn http(
             }
             let token = token.to_owned();
             resumable_upload(ctx.clone(), request, token, device.id).await
+        } else if path.starts_with("/api/applications/launches/") && method == Method::GET {
+            if !device.permissions.input { return error(StatusCode::FORBIDDEN, "此设备没有遥控权限"); }
+            let request = path.strip_prefix("/api/applications/launches/").unwrap_or_default();
+            if !crate::launcher::valid_id(request) { return error(StatusCode::BAD_REQUEST, "启动请求无效"); }
+            match ctx.controller.launch_queue.as_ref().and_then(|queue| queue.status(&device.id, request)) {
+                Some(report) => json(StatusCode::OK, serde_json::json!(report)),
+                None => error(StatusCode::NOT_FOUND, "未找到启动结果，请检查电脑；不会自动重发"),
+            }
+        } else if path == "/api/applications/icons" && method == Method::GET {
+            if !device.permissions.input {
+                return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
+            }
+            let icons = crate::launcher::icons(ctx.store.clone(), ctx.application_icon_slots.clone()).await;
+            if !ctx.pairing.lock().unwrap().device(token).is_some_and(|current| current.permissions.input) {
+                return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
+            }
+            match icons {
+                Ok(icons) => json(StatusCode::OK, serde_json::json!({"icons":icons})),
+                Err(message) => error(StatusCode::SERVICE_UNAVAILABLE, &message),
+            }
+        } else if path == "/api/applications" && method == Method::GET {
+            if !device.permissions.input {
+                return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
+            }
+            let entries = match crate::launcher::catalog(ctx.store.clone(), ctx.application_slots.clone()).await {
+                Ok(entries) => entries,
+                Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, &message),
+            };
+            if !ctx.pairing.lock().unwrap().device(token).is_some_and(|current| current.permissions.input) {
+                return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
+            }
+            json(StatusCode::OK, serde_json::json!({"applications": entries, "launchJobs":ctx.controller.launch_queue.is_some()}))
         } else if path == "/api/windows" && method == Method::GET {
             if !device.permissions.input {
                 return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
@@ -884,7 +1132,15 @@ async fn http(
             if !ctx.store.lock().unwrap().primary_allows(&device.id) {
                 return error(StatusCode::FORBIDDEN, "当前无主控权");
             }
-            return match ctx.controller.probe_windows().await {
+            let windows = ctx.controller.probe_windows().await;
+            let current = ctx.pairing.lock().unwrap().device(token);
+            let Some(current) = current else {
+                return error(StatusCode::UNAUTHORIZED, "配对已失效，请重新配对");
+            };
+            if !current.permissions.input || !ctx.store.lock().unwrap().primary_allows(&current.id) {
+                return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
+            }
+            return match windows {
                 Ok(windows) => json(StatusCode::OK, serde_json::json!({"windows":windows})),
                 Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
             };
@@ -892,6 +1148,7 @@ async fn http(
             if !device.permissions.input {
                 return error(StatusCode::FORBIDDEN, "此设备没有遥控权限");
             }
+            let credential = token.to_owned();
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct SwitchRequest {
@@ -912,8 +1169,11 @@ async fn http(
             if !ctx.store.lock().unwrap().primary_allows(&device.id) {
                 return error(StatusCode::FORBIDDEN, "当前无主控权");
             }
-            return match ctx.controller.switch_window(body.hwnd).await {
+            let current = ctx.clone();
+            return match ctx.controller.switch_window(body.hwnd, move || current.window_access(&credential)).await {
                 Ok(()) => json(StatusCode::OK, serde_json::json!({"switched":true})),
+                Err(message) if message == "配对已失效，请重新配对" => error(StatusCode::UNAUTHORIZED, &message),
+                Err(message) if matches!(message.as_str(), "此设备没有遥控权限" | "当前无主控权") => error(StatusCode::FORBIDDEN, &message),
                 Err(message) => error(StatusCode::CONFLICT, &message),
             };
         } else if method == Method::GET {
@@ -962,6 +1222,108 @@ async fn close(socket: &mut WebSocket, code: u16) {
             }
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    struct NoInput;
+    impl crate::control::Native for NoInput {
+        fn execute(&mut self,_:&crate::protocol::Command)->Result<(),String> {Err("input disabled".into())}
+        fn release(&mut self)->Result<(),String> {Ok(())}
+    }
+    #[tokio::test]
+    async fn usb_port_history_rejects_forced_old_candidates_and_survives_server_recreation() {
+        let candidate=tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await.unwrap();let old=candidate.local_addr().unwrap().port();let _=claim_usb_port(old);
+        let fresh=fresh_usb_listener(Some(candidate)).await.unwrap();let fresh_port=fresh.local_addr().unwrap().port();assert_ne!(fresh_port,old);assert!(!claim_usb_port(fresh_port));drop(fresh);
+        let controller=Controller::start(||Ok(Box::new(NoInput))).unwrap();let store=crate::preferences::Store::memory();let files=FileHub::new();let mut ports=std::collections::HashSet::from([old,fresh_port]);
+        for _ in 0..3 {let mut server=Server::start_usb_only(controller.clone(),store.clone(),files.clone()).await.unwrap();assert!(ports.insert(server.usb_address().unwrap().port()));server.ensure_usb_for("fixture").await.unwrap();assert!(ports.insert(server.rotate_usb_for("fixture").await.unwrap().port()));server.stop().await;}
+        controller.shutdown();
+    }
+    #[tokio::test]
+    async fn a_stopped_endpoint_cannot_commit_a_pairing_body_already_being_read() {
+        let store=crate::preferences::Store::memory();let controller=Controller::start(||Ok(Box::new(NoInput))).unwrap();
+        let mut server=Server::start_with_store(std::net::Ipv4Addr::LOCALHOST,0,controller.clone(),store.clone()).await.unwrap();
+        let (stop,signal)=watch::channel(false);let view=Arc::new(Context{shutdown:signal,..(*server.context).clone()});
+        let (body_sender,body_receiver)=tokio::sync::oneshot::channel::<Vec<u8>>();let entered=Arc::new(tokio::sync::Notify::new());let reading=entered.clone();
+        let body=axum::body::Body::from_stream(futures_util::stream::once(async move {reading.notify_one();body_receiver.await.map(axum::body::Bytes::from).map_err(|_|std::io::Error::other("fixture closed"))}));
+        let request=Request::builder().method(Method::POST).uri("/api/pair").header("host",server.address.to_string()).header("origin",&server.context.origin).header("content-type","application/json").body(body).unwrap();
+        let pending=tokio::spawn(http(State(view),ConnectInfo(crate::transport::Peer("127.0.0.1:1".parse().unwrap(),None)),request));
+        tokio::time::timeout(Duration::from_secs(1),entered.notified()).await.unwrap();stop.send(true).unwrap();
+        body_sender.send(serde_json::to_vec(&serde_json::json!({"code":server.context.code()})).unwrap()).unwrap();
+        assert_eq!(pending.await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);assert!(store.lock().unwrap().get().devices.is_empty());
+        let response=reqwest::Client::builder().no_proxy().build().unwrap().post(format!("{}/api/pair",server.context.origin)).json(&serde_json::json!({"code":server.context.code()})).send().await.unwrap();
+        assert_eq!(response.status(),200);assert_eq!(store.lock().unwrap().get().devices.len(),1);server.stop().await;controller.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod window_permission_tests {
+    use super::*;
+    use crate::{control::Native, protocol::Command};
+    use std::sync::{atomic::AtomicUsize, mpsc};
+
+    struct Input {
+        switches: Arc<AtomicUsize>,
+        started: mpsc::SyncSender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+    impl Native for Input {
+        fn execute(&mut self, _: &Command) -> Result<(), String> { Ok(()) }
+        fn release(&mut self) -> Result<(), String> { Ok(()) }
+        fn probe_windows(&mut self) -> Result<serde_json::Value, String> {
+            self.started.send(()).unwrap();
+            self.resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(serde_json::json!([]))
+        }
+        fn switch_to_window(&mut self, _: u64) -> Result<(), String> {
+            self.switches.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_window_switch_rechecks_current_authorization_before_execution() {
+        let mut outcomes = Vec::new();
+        for change in ["none", "input", "primary", "pairing", "token"] {
+            let switches = Arc::new(AtomicUsize::new(0));
+            let (started, ready) = mpsc::sync_channel(1);
+            let (resume, wait) = mpsc::channel();
+            let backend = Input { switches: switches.clone(), started, resume: wait };
+            let controller = Controller::start(move || Ok(Box::new(backend))).unwrap();
+            let store = crate::preferences::Store::memory();
+            let mut server = Server::start_with_store(std::net::Ipv4Addr::LOCALHOST, 0, controller.clone(), store.clone()).await.unwrap();
+            let code = server.context.code();
+            let token = server.context.pairing.lock().unwrap().pair(&code).unwrap().unwrap();
+            let other = controller.clone();
+            let blocked = tokio::spawn(async move { other.probe_windows().await });
+            tokio::task::spawn_blocking(move || ready.recv().unwrap()).await.unwrap();
+            let request = Request::builder().method(Method::POST).uri("/api/windows/switch")
+                .header("host", server.context.origin.parse::<axum::http::Uri>().unwrap().authority().unwrap().as_str())
+                .header("origin", &server.context.origin).header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from("{\"hwnd\":42}")).unwrap();
+            let mut pending = std::pin::pin!(http(State(server.context.clone()), ConnectInfo(crate::transport::Peer("127.0.0.1:1".parse().unwrap(),None)), request));
+            assert!(futures_util::poll!(pending.as_mut()).is_pending(), "request should enqueue behind blocked native input");
+            store.lock().unwrap().update(|prefs| match change {
+                "input" => prefs.devices[0].permissions.input = false,
+                "primary" => { prefs.control_mode = crate::preferences::ControlMode::Primary; prefs.primary_device = Some("other-device".into()); }
+                "pairing" => prefs.devices.clear(),
+                "token" => prefs.devices[0].token_digest = "0".repeat(64),
+                _ => {},
+            }).unwrap();
+            resume.send(()).unwrap();
+            let response = pending.await;
+            let _ = blocked.await.unwrap();
+            let count = switches.load(Ordering::SeqCst);
+            server.stop().await;
+            controller.shutdown();
+            outcomes.push((change, response.status(), count));
+        }
+        for (change, status, count) in outcomes {
+            assert_eq!(status, match change { "none" => StatusCode::OK, "pairing" | "token" => StatusCode::UNAUTHORIZED, _ => StatusCode::FORBIDDEN }, "{change}");
+            assert_eq!(count, usize::from(change == "none"), "{change}: unauthorized request reached native window control");
+        }
     }
 }
 

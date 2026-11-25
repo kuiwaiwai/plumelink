@@ -1,3 +1,4 @@
+param([switch]$Candidate)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $release = Join-Path $root 'release'
@@ -46,7 +47,7 @@ try {
     try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
     if (!$held) { throw 'Another PlumeLink packaging job is running.' }
     Assert-LocalDirectory $artifacts $root
-    Assert-LocalDirectory $release $root
+    if (!$Candidate) { Assert-LocalDirectory $release $root }
     New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
     $id = [guid]::NewGuid().ToString('N')
     $work = Join-Path $artifacts "pack-$id"
@@ -56,6 +57,10 @@ try {
     & (Join-Path $PSScriptRoot 'build-android.ps1') -Release -OutputDirectory $ready
     Run-Tauri -Arguments @('build', '--no-bundle')
     & (Join-Path $PSScriptRoot 'verify-build-paths.ps1') -Files $exe
+    & node scripts/verify-usb-component.mjs $exe
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled USB component validation failed.' }
+    & node scripts/verify-usb-startup.mjs $exe
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled USB startup validation failed.' }
 
     if (!(Test-Path -LiteralPath $driver) -or (Get-Sha256 $driver) -ne $driverHash) {
         $download = Join-Path $work 'driver.zip'
@@ -76,25 +81,36 @@ try {
         Write-Host "$hash  $($file.Name)"
     }
 
-    # Publish only after every build succeeds. Preserve unrelated files from an older output folder.
-    $previous = Join-Path $artifacts "previous-release-$id"
     Assert-LocalDirectory $ready $work
-    Assert-LocalDirectory $previous $artifacts
-    if (Test-Path -LiteralPath $release) { [IO.Directory]::Move($release, $previous) }
-    try { [IO.Directory]::Move($ready, $release) }
-    catch {
-        if (Test-Path -LiteralPath $previous) { [IO.Directory]::Move($previous, $release) }
-        throw
-    }
-    if (Test-Path -LiteralPath $previous) {
-        foreach ($file in $files) {
-            $old = Join-Path $previous $file.Name
-            if (Test-Path -LiteralPath $old -PathType Leaf) { Remove-Item -LiteralPath $old }
+    if ($Candidate) {
+        $candidates = Join-Path $artifacts 'candidates'
+        Assert-LocalDirectory $candidates $artifacts
+        New-Item -ItemType Directory -Force -Path $candidates | Out-Null
+        Assert-LocalDirectory $candidates $artifacts
+        $destination = Join-Path $candidates "PlumeLink-$version-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$id"
+        Assert-LocalDirectory $destination $candidates
+        [IO.Directory]::Move($ready, $destination)
+        Write-Host "Candidate ready: $destination"
+    } else {
+        # Publish only after every build succeeds. Preserve unrelated files from an older output folder.
+        $previous = Join-Path $artifacts "previous-release-$id"
+        Assert-LocalDirectory $previous $artifacts
+        if (Test-Path -LiteralPath $release) { [IO.Directory]::Move($release, $previous) }
+        try { [IO.Directory]::Move($ready, $release) }
+        catch {
+            if (Test-Path -LiteralPath $previous) { [IO.Directory]::Move($previous, $release) }
+            throw
         }
-        if (@(Get-ChildItem -LiteralPath $previous -Force).Count -eq 0) { [IO.Directory]::Delete($previous) }
-        else { Write-Host "Other previous files preserved in $previous" }
+        if (Test-Path -LiteralPath $previous) {
+            foreach ($file in $files) {
+                $old = Join-Path $previous $file.Name
+                if (Test-Path -LiteralPath $old -PathType Leaf) { Remove-Item -LiteralPath $old }
+            }
+            if (@(Get-ChildItem -LiteralPath $previous -Force).Count -eq 0) { [IO.Directory]::Delete($previous) }
+            else { Write-Host "Other previous files preserved in $previous" }
+        }
+        Write-Host "Release ready: $release"
     }
-    Write-Host "Release ready: $release"
 } finally {
     try {
         if ($work -and (Test-Path -LiteralPath $work)) {

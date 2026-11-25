@@ -1,0 +1,4 @@
+<resources>
+    <string name="ui_audio_usb_interrupted">Audio connection interrupted. Check the cable and PC Preferences → USB connection, then restart the microphone.</string>
+    <string name="ui_audio_connection_interrupted">Audio connection is not responding. Check the connection, then restart the microphone.</string>
+</resources>

@@ -2,20 +2,15 @@
 use crate::{
     control::Native,
     protocol::{
-        Button, ComboKey, Command, Direction, Key, Modifier, Switch, Volume, WindowEntry,
+        Button, Command, Direction, Media, Modifier, Switch, Volume, WindowEntry,
         ZoomDirection,
     },
 };
-use std::sync::OnceLock;
-use base64::Engine as _;
+use std::sync::{Arc, OnceLock};
 use windows::{
     core::{GUID, PWSTR},
     Win32::{
         Foundation::{CloseHandle, HWND, LPARAM, POINT},
-        Graphics::Gdi::{
-            DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD,
-        },
         Media::Audio::{
             eMultimedia, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
             MMDeviceEnumerator,
@@ -34,9 +29,9 @@ use windows::{
             },
             Input::KeyboardAndMouse::*,
             WindowsAndMessaging::{
-                EnumWindows, GetCursorPos, GetForegroundWindow, GetIconInfo, GetLastActivePopup,
-                GetWindowThreadProcessId, GetWindowTextW, ICONINFO,
-                IsIconic, IsWindow, IsWindowVisible, GetClassLongPtrW, GCLP_HICONSM, GCLP_HICON, SetCursorPos,
+                EnumWindows, GetCursorPos, GetForegroundWindow, GetLastActivePopup,
+                GetWindowThreadProcessId, GetWindowTextW,
+                IsIconic, IsWindow, IsWindowVisible, SetCursorPos,
                 SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
             },
         },
@@ -97,86 +92,8 @@ unsafe fn process_image_name(pid: u32) -> String {
     path.rsplit(['\\', '/']).next().unwrap_or_default().to_string()
 }
 
-/// Convert a window icon into a small BMP data URL so the phone can draw it directly.
-unsafe fn window_icon(hwnd: HWND) -> Option<String> {
-    // Read class metadata without asking another application's UI thread to respond.
-    let mut raw = GetClassLongPtrW(hwnd, GCLP_HICONSM);
-    if raw == 0 { raw = GetClassLongPtrW(hwnd, GCLP_HICON); }
-    let icon = windows::Win32::UI::WindowsAndMessaging::HICON(raw as *mut _);
-    if icon.0.is_null() { return None; }
-    icon_to_data_url(icon)
-}
-
-unsafe fn icon_to_data_url(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<String> {
-    let mut info = ICONINFO::default();
-    GetIconInfo(icon, &mut info).ok()?;
-    let color = info.hbmColor;
-    let mask = info.hbmMask;
-    let result = (|| {
-        if color.0.is_null() { return None; }
-        let mut bitmap = BITMAP::default();
-        if GetObjectW(
-            HGDIOBJ(color.0),
-            std::mem::size_of::<BITMAP>() as i32,
-            Some(&mut bitmap as *mut _ as *mut _),
-        ) == 0 {
-            return None;
-        }
-        let width = bitmap.bmWidth.clamp(1, 128);
-        let height = bitmap.bmHeight.clamp(1, 128);
-        let stride = (width * 4) as usize;
-        let mut pixels = vec![0u8; stride * height as usize];
-        let header = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        };
-        let mut info = BITMAPINFO { bmiHeader: header, bmiColors: [RGBQUAD::default()] };
-        let dc = GetDC(None);
-        let lines = GetDIBits(
-            dc,
-            color,
-            0,
-            height as u32,
-            Some(pixels.as_mut_ptr() as *mut _),
-            &mut info,
-            DIB_RGB_COLORS,
-        );
-        let _ = ReleaseDC(None, dc);
-        if lines == 0 { return None; }
-        // Some icons come back with an empty alpha channel; make them opaque instead of invisible.
-        if pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0) {
-            for pixel in pixels.as_chunks_mut::<4>().0 { pixel[3] = 255; }
-        }
-        let pixel_bytes = pixels.len() as u32;
-        let file_size = 54 + pixel_bytes;
-        let mut out = Vec::with_capacity(file_size as usize);
-        out.extend_from_slice(b"BM");
-        out.extend_from_slice(&file_size.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&54u32.to_le_bytes());
-        out.extend_from_slice(&40u32.to_le_bytes());
-        out.extend_from_slice(&width.to_le_bytes());
-        out.extend_from_slice(&height.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&32u16.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&pixel_bytes.to_le_bytes());
-        out.extend_from_slice(&[0u8; 16]);
-        out.extend_from_slice(&pixels);
-        Some(format!(
-            "data:image/bmp;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&out)
-        ))
-    })();
-    if !color.0.is_null() { let _ = DeleteObject(HGDIOBJ(color.0)); }
-    if !mask.0.is_null() { let _ = DeleteObject(HGDIOBJ(mask.0)); }
-    result
-}
+pub use crate::icons::application_icon;
+use crate::icons::window_icon;
 
 #[derive(Default)]
 struct HeldButton {
@@ -196,6 +113,7 @@ impl HeldButton {
 }
 
 pub struct WindowsControl {
+    launches: Arc<crate::launcher::jobs::LaunchQueue>,
     qft_positions: std::collections::HashMap<u64, LogicalPointer>,
     admin: Option<std::sync::Arc<crate::admin_control::AdminManager>>,
     alt: bool,
@@ -209,6 +127,17 @@ pub struct WindowsControl {
     previous_dpi: isize,
 }
 impl WindowsControl {
+    fn list_windows() -> Result<serde_json::Value, String> {
+        unsafe {
+            let mut entries: Vec<WindowEntry> = Vec::new();
+            let result = EnumWindows(Some(Self::enumerate_callback), LPARAM(&mut entries as *mut _ as isize));
+            if result.is_ok() {
+                Ok(serde_json::to_value(entries).unwrap_or_else(|_| serde_json::Value::Array(Default::default())))
+            } else {
+                Err("枚举窗口失败".into())
+            }
+        }
+    }
     pub(crate) fn position_cursor(x: i32, y: i32) -> Result<(), String> {
         unsafe { SetCursorPos(x, y) }.map_err(|e| format!("Windows 拒绝移动指针：{e}"))
     }
@@ -275,6 +204,7 @@ impl WindowsControl {
             }
         };
         Ok(Self {
+            launches: crate::launcher::jobs::LaunchQueue::new(store.clone()),
             qft_positions: std::collections::HashMap::new(),
             admin,
             alt: false,
@@ -289,16 +219,19 @@ impl WindowsControl {
         })
     }
     fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        let extended = [
+            VK_RCONTROL, VK_RMENU, VK_LWIN, VK_RWIN, VK_APPS,
+            VK_INSERT, VK_DELETE, VK_HOME, VK_END, VK_PRIOR, VK_NEXT,
+            VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_SNAPSHOT, VK_DIVIDE,
+        ].contains(&vk);
+        let mut flags = if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
+        if up { flags |= KEYEVENTF_KEYUP; }
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
-                    dwFlags: if up {
-                        KEYEVENTF_KEYUP
-                    } else {
-                        KEYBD_EVENT_FLAGS(0)
-                    },
+                    dwFlags: flags,
                     ..Default::default()
                 },
             },
@@ -338,6 +271,9 @@ impl WindowsControl {
         Self::send(&[Self::key(vk, false), Self::key(vk, true)])
     }
     fn chord(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) -> Result<(), String> {
+        Self::send(&Self::chord_events(modifiers, key))
+    }
+    fn chord_events(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) -> Vec<INPUT> {
         let mut events = Vec::with_capacity(modifiers.len() * 2 + 2);
         for &modifier in modifiers {
             events.push(Self::key(modifier, false));
@@ -347,7 +283,7 @@ impl WindowsControl {
         for &modifier in modifiers.iter().rev() {
             events.push(Self::key(modifier, true));
         }
-        Self::send(&events)
+        events
     }
     fn mouse(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS, data: u32) -> INPUT {
         INPUT {
@@ -556,24 +492,7 @@ impl WindowsControl {
                     Self::send(&events)
                 }
             }
-            Command::Key { key } => Self::tap(match key {
-                Key::Space => VK_SPACE,
-                Key::Left => VK_LEFT,
-                Key::Right => VK_RIGHT,
-                Key::Up => VK_UP,
-                Key::Down => VK_DOWN,
-                Key::Enter => VK_RETURN,
-                Key::Escape => VK_ESCAPE,
-                Key::Backspace => VK_BACK,
-                Key::Tab => VK_TAB,
-                Key::Delete => VK_DELETE,
-                Key::Home => VK_HOME,
-                Key::End => VK_END,
-                Key::Pageup => VK_PRIOR,
-                Key::Pagedown => VK_NEXT,
-                Key::F5 => VK_F5,
-                Key::F11 => VK_F11,
-            }),
+            Command::Key { key } => Self::tap(VIRTUAL_KEY(*key as u16)),
             Command::Combo { modifiers, key } => {
                 let mods: Vec<VIRTUAL_KEY> = modifiers
                     .iter()
@@ -581,33 +500,10 @@ impl WindowsControl {
                         Modifier::Ctrl => VK_CONTROL,
                         Modifier::Alt => VK_MENU,
                         Modifier::Shift => VK_SHIFT,
+                        Modifier::Win => VK_LWIN,
                     })
                     .collect();
-                let target = match key {
-                    ComboKey::Space => VK_SPACE,
-                    ComboKey::Left => VK_LEFT,
-                    ComboKey::Right => VK_RIGHT,
-                    ComboKey::Up => VK_UP,
-                    ComboKey::Down => VK_DOWN,
-                    ComboKey::Enter => VK_RETURN,
-                    ComboKey::Escape => VK_ESCAPE,
-                    ComboKey::Backspace => VK_BACK,
-                    ComboKey::Tab => VK_TAB,
-                    ComboKey::Home => VK_HOME,
-                    ComboKey::End => VK_END,
-                    ComboKey::Pageup => VK_PRIOR,
-                    ComboKey::Pagedown => VK_NEXT,
-                    ComboKey::F5 => VK_F5,
-                    ComboKey::F11 => VK_F11,
-                    ComboKey::A => VIRTUAL_KEY(0x41),
-                    ComboKey::C => VIRTUAL_KEY(0x43),
-                    ComboKey::F => VIRTUAL_KEY(0x46),
-                    ComboKey::V => VIRTUAL_KEY(0x56),
-                    ComboKey::W => VIRTUAL_KEY(0x57),
-                    ComboKey::X => VIRTUAL_KEY(0x58),
-                    ComboKey::Y => VIRTUAL_KEY(0x59),
-                    ComboKey::Z => VIRTUAL_KEY(0x5a),
-                };
+                let target = VIRTUAL_KEY(*key as u16);
                 Self::chord(&mods, target)
             }
             Command::Desktop {} => Self::send(&[
@@ -694,6 +590,12 @@ impl WindowsControl {
                 }
                 flush(&mut batch)
             }
+            Command::Media { action } => Self::tap(match action {
+                Media::Playpause => VK_MEDIA_PLAY_PAUSE,
+                Media::Previous => VK_MEDIA_PREV_TRACK,
+                Media::Next => VK_MEDIA_NEXT_TRACK,
+                Media::Stop => VK_MEDIA_STOP,
+            }),
             Command::Volume { action } => {
                 let endpoint = Self::audio()?;
                 let context = GUID::zeroed();
@@ -759,17 +661,22 @@ impl WindowsControl {
                 Ok(())
             }
             Command::Release {} => self.release_for(self.active_session),
+            Command::Launch { id, request } => self.launches.request(self.active_session, None, id, request.as_deref()),
             Command::ListWindows {} | Command::SwitchToWindow { .. } => Ok(()),
         }
     }
 }
 impl Native for WindowsControl {
+    fn launch_queue(&self) -> Option<Arc<crate::launcher::jobs::LaunchQueue>> { Some(self.launches.clone()) }
     fn qft_action_for(
         &mut self,
         session: u64,
         device: Option<&str>,
         command: &Command,
     ) -> Result<(), String> {
+        if let Command::Launch { id, request } = command {
+            return self.launches.request(session, device, id, request.as_deref());
+        }
         if let Some(device) = device.filter(|device| {
             crate::admin_control::elevated_command(command)
                 && self
@@ -913,16 +820,11 @@ impl Native for WindowsControl {
             )
         }
     }
+    fn window_reader(&self) -> Option<crate::control::WindowReader> {
+        Some(Arc::new(Self::list_windows))
+    }
     fn probe_windows(&mut self) -> Result<serde_json::Value, String> {
-        unsafe {
-            let mut entries: Vec<WindowEntry> = Vec::new();
-            let result = EnumWindows(Some(Self::enumerate_callback), LPARAM(&mut entries as *mut _ as isize));
-            if result.is_ok() {
-                Ok(serde_json::to_value(entries).unwrap_or_else(|_| serde_json::Value::Array(Default::default())))
-            } else {
-                Err("枚举窗口失败".into())
-            }
-        }
+        Self::list_windows()
     }
     fn switch_to_window(&mut self, hwnd_val: u64) -> Result<(), String> {
         unsafe {
@@ -1004,9 +906,59 @@ mod window_switch_tests {
 }
 
 #[cfg(test)]
-mod qft_pointer_tests {
+mod input_tests {
     use super::LogicalPointer;
     use qfast_transmission::Vector;
+    #[test]
+    fn navigation_keys_keep_the_dedicated_key_identity_on_press_and_release() {
+        use super::{WindowsControl, VIRTUAL_KEY, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP};
+        use crate::protocol::Key;
+        for key in [Key::Left, Key::Right, Key::Up, Key::Down, Key::Home, Key::End, Key::Pageup, Key::Pagedown, Key::Delete] {
+            let down = WindowsControl::key(VIRTUAL_KEY(key as u16), false);
+            let up = WindowsControl::key(VIRTUAL_KEY(key as u16), true);
+            unsafe {
+                assert_eq!(down.Anonymous.ki.dwFlags, KEYEVENTF_EXTENDEDKEY, "{key:?} down");
+                assert_eq!(up.Anonymous.ki.dwFlags, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, "{key:?} up");
+            }
+        }
+    }
+    #[test]
+    fn ordinary_keys_and_right_shift_do_not_become_extended_keys() {
+        use super::*;
+        for key in [VK_RETURN, VK_TAB, VK_SPACE, VK_BACK, VK_ESCAPE, VK_F12, VIRTUAL_KEY(0x41), VIRTUAL_KEY(0x31), VK_LSHIFT, VK_RSHIFT, VK_NUMLOCK] {
+            unsafe {
+                assert_eq!(WindowsControl::key(key, false).Anonymous.ki.dwFlags, KEYBD_EVENT_FLAGS(0));
+                assert_eq!(WindowsControl::key(key, true).Anonymous.ki.dwFlags, KEYEVENTF_KEYUP);
+            }
+        }
+    }
+    #[test]
+    fn modifier_recovery_releases_extended_modifiers_with_the_same_key_identity() {
+        use super::*;
+        let mut events = Vec::new();
+        WindowsControl::push_dirty_modifiers(&mut events);
+        for key in [VK_RCONTROL, VK_RMENU, VK_LWIN] {
+            let release = events.iter().find(|event| unsafe { event.Anonymous.ki.wVk == key }).unwrap();
+            assert_eq!(unsafe { release.Anonymous.ki.dwFlags }, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+        }
+        assert_eq!(unsafe { WindowsControl::key(VK_RWIN, true).Anonymous.ki.dwFlags }, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+    }
+    #[test]
+    fn a_shortcut_releases_its_key_then_all_modifiers_in_reverse_order() {
+        use super::*;
+        let events = WindowsControl::chord_events(&[VK_RCONTROL, VK_RMENU], VK_F12);
+        let actual: Vec<_> = events.iter().map(|event| unsafe {
+            (event.Anonymous.ki.wVk, event.Anonymous.ki.dwFlags)
+        }).collect();
+        assert_eq!(actual, [
+            (VK_RCONTROL, KEYEVENTF_EXTENDEDKEY),
+            (VK_RMENU, KEYEVENTF_EXTENDEDKEY),
+            (VK_F12, KEYBD_EVENT_FLAGS(0)),
+            (VK_F12, KEYEVENTF_KEYUP),
+            (VK_RMENU, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
+            (VK_RCONTROL, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
+        ]);
+    }
     #[test]
     fn shared_drag_retries_the_last_release_without_releasing_other_owners() {
         let mut held = super::HeldButton::default();

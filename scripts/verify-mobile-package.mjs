@@ -121,7 +121,14 @@ try {
  const uploadId='a123456789abcdef0123456789abcdef';
  const upload=await fetch(ready.origin+'/api/uploads',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({id:uploadId,name:'size-boundary.bin',size:2*1024**3})});
  assert.equal(upload.status,200);assert.equal((await upload.json()).size,2*1024**3);
- const cancel=await fetch(ready.origin+'/api/uploads/'+uploadId,{method:'DELETE',headers});assert.equal(cancel.status,200);
+ let cancel=await fetch(ready.origin+'/api/uploads/'+uploadId,{method:'DELETE',headers});
+ const cancelDeadline=Date.now()+5000;
+ while(cancel.status===202 && Date.now()<cancelDeadline) {
+   const pending=await cancel.json();assert(['pending','cancelling'].includes(pending.state));assert.equal(pending.cancelled,false);
+   await new Promise(resolve=>setTimeout(resolve,20));
+   cancel=await fetch(ready.origin+'/api/uploads/'+uploadId,{headers});
+ }
+ assert.equal(cancel.status,200);assert.equal((await cancel.json()).cancelled,true);
  await app.request({action:'revoke'});
  const rejected = await fetch(ready.origin + '/api/status', { headers: { Authorization: `Bearer ${token}`, Origin: ready.origin } });
  assert.equal(rejected.status, 401);

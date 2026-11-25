@@ -1,6 +1,6 @@
 import { t } from "../../shared/i18n";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopState } from "../../shared/protocol";
+import type { DesktopState, ReceiveAction } from "../../shared/protocol";
 export const DEFAULT_SERVICE_PORT = 17840;
 let revision = 0;
 let stateRequest = 0;
@@ -38,6 +38,8 @@ async function readState() {
 }
 export const desktop = {
   state: readState,
+  receive: (action: ReceiveAction, taskId?: string) =>
+    mutate("receive_action", { action, taskId }),
   setPort: (port: number, address: string) => mutate("set_service_port", { port, address }),
   action: (action: string, address?: string) =>
     mutate("desktop_action", { action, address }),

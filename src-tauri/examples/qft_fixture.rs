@@ -6,9 +6,29 @@ use plumelink::{
     server::Server,
 };
 use std::io::{self, BufRead, Write};
-struct Device;
+struct Device { launches: Option<std::sync::Arc<plumelink::launcher::jobs::LaunchQueue>>, usb: bool }
 impl Native for Device {
+    fn probe_windows(&mut self) -> Result<serde_json::Value,String> {
+        Ok(if self.usb { serde_json::json!([{"hwnd":111,"title":"USB fixture window","app":"Fixture","minimized":false,"icon":null}]) } else { serde_json::json!([]) })
+    }
+    fn switch_to_window(&mut self, hwnd:u64) -> Result<(),String> {
+        if !self.usb || hwnd!=111 { return Err("窗口已关闭".into()); }
+        println!("{}",serde_json::json!({"event":"window-switch","hwnd":hwnd}));let _=io::stdout().flush();Ok(())
+    }
+    fn launch_queue(&self) -> Option<std::sync::Arc<plumelink::launcher::jobs::LaunchQueue>> { self.launches.clone() }
+    fn qft_action_for(&mut self, session: u64, device: Option<&str>, command: &Command) -> Result<(), String> {
+        if let (Some(queue), Command::Launch { id, request }) = (&self.launches, command) {
+            queue.request(session, device, id, request.as_deref())?;
+            println!("{}", serde_json::json!({"event":"command","command":command}));
+            let _ = io::stdout().flush();
+            return Ok(());
+        }
+        self.execute(command)
+    }
     fn execute(&mut self, command: &Command) -> Result<(), String> {
+        if let (Some(queue), Command::Launch { id, request }) = (&self.launches, command) {
+            queue.request(0, None, id, request.as_deref())?;
+        }
         println!(
             "{}",
             serde_json::json!({"event":"command","command":command})
@@ -29,7 +49,14 @@ impl Native for Device {
 }
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg|arg=="--inspect-usb") {
+        let bridge=plumelink::usb::Bridge::default();let status=bridge.refresh("",None).await;
+        println!("{}",serde_json::json!({"event":"usb-component-inspection","available":status.available,"deviceCount":status.devices.len(),"states":status.devices.iter().map(|device|&device.state).collect::<Vec<_>>(),"error":status.error}));
+        assert!(status.available&&status.error.is_empty());return;
+    }
     let mixed = std::env::args().any(|v| v == "--mixed");
+    let recovery = std::env::args().any(|v| v == "--recovery");
+    let usb = std::env::args().any(|v| v == "--usb" || v == "--usb-only");
     let output = std::env::args()
         .find_map(|arg| arg.strip_prefix("--windows-audio-output=").map(str::to_owned))
         .map(|name| {
@@ -50,8 +77,11 @@ async fn main() {
             }
         });
     assert!(host.is_loopback(), "the fixture only listens on loopback");
-    let mut controller = Controller::start(|| Ok(Box::new(Device))).unwrap();
     let store = plumelink::preferences::Store::memory();
+    let launch_path = std::env::args().find_map(|arg| arg.strip_prefix("--launch=").map(std::path::PathBuf::from));
+    if let Some(path) = &launch_path { plumelink::launcher::add(&store, vec![path.clone()]).unwrap(); }
+    let launches = launch_path.map(|_| plumelink::launcher::jobs::LaunchQueue::new(store.clone()));
+    let mut controller = Controller::start(move || Ok(Box::new(Device { launches, usb }))).unwrap();
     if let Some(output) = &output {
         store.lock().unwrap().update(|p| p.audio_output = output.id.clone()).unwrap();
     }
@@ -107,34 +137,63 @@ async fn main() {
             )),
         );
     }
-    let mut server = Server::start_secure_with_files(
+    let mut server = if std::env::args().any(|v|v=="--usb-only") { Server::start_usb_only(controller.clone(),store.clone(),files).await.unwrap() } else { Server::start_secure_with_files(
         host,
         0,
         controller.clone(),
-        store,
+        store.clone(),
         files,
     )
     .await
-    .unwrap();
+    .unwrap() };
+    let usb_origin = if usb { Some(format!("https://{}",server.ensure_usb().await.unwrap())) } else { None };
+    let mut recovery_servers = Vec::new();
+    let mut recovery_controllers = Vec::new();
+    let mut recovery_origins = serde_json::Map::new();
+    if recovery {
+        let base = store.lock().unwrap().get();
+        for kind in ["same", "changedCertificate", "changedIdentity"] {
+            let peer_store = if kind == "same" { store.clone() } else {
+                let peer = plumelink::preferences::Store::memory();
+                peer.lock().unwrap().update(|preferences| {
+                    if kind == "changedCertificate" { preferences.installation_id = base.installation_id.clone(); }
+                    else { preferences.tls = base.tls.clone(); }
+                }).unwrap();
+                peer
+            };
+            let peer_controller = Controller::start(|| Ok(Box::new(Device { launches: None, usb: false }))).unwrap();
+            let peer = Server::start_secure_with_store(host, 0, peer_controller.clone(), peer_store).await.unwrap();
+            recovery_origins.insert(kind.into(), peer.context.origin.clone().into());
+            recovery_servers.push(peer); recovery_controllers.push(peer_controller);
+        }
+    }
     println!(
         "{}",
-        serde_json::json!({"event":"ready","origin":server.context.origin,"code":server.context.code()})
+        serde_json::json!({"event":"ready","origin":server.context.origin,"usbOrigin":usb_origin,"usbAccess":server.usb_access_for(""),"code":server.context.code(),"recovery":recovery_origins})
     );
     io::stdout().flush().unwrap();
-    let context = server.context.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let (sender,mut receiver)=tokio::sync::mpsc::unbounded_channel();
+    let reader = tokio::task::spawn_blocking(move || {
         for line in io::stdin().lock().lines() {
-            if line.as_deref().ok() != Some("code") {
-                break;
-            }
-            println!(
-                "{}",
-                serde_json::json!({"event":"pairing-code","code":context.code()})
-            );
-            let _ = io::stdout().flush();
+            let Ok(line)=line else {break;};let known=matches!(line.as_str(),"code"|"lan-off"|"usb-off"|"input-suspend"|"input-resume"|"bulk-pressure");
+            if sender.send(line).is_err() || !known {break;}
         }
-    })
-    .await;
+    });
+    while let Some(command)=receiver.recv().await {
+        match command.as_str() {
+            "code"=>println!("{}",serde_json::json!({"event":"pairing-code","code":server.context.code()})),
+            "lan-off"=>{server.stop_lan().await;println!("{}",serde_json::json!({"event":"lan-stopped"}));},
+            "usb-off"=>{server.stop_usb().await;println!("{}",serde_json::json!({"event":"usb-stopped"}));},
+            "input-suspend"=>{controller.suspend_inputs();println!("{}",serde_json::json!({"event":"input-suspended"}));},
+            "input-resume"=>{controller.resume_inputs(true);println!("{}",serde_json::json!({"event":"input-resumed"}));},
+            "bulk-pressure"=>{controller.audio.note_pressure();println!("{}",serde_json::json!({"event":"bulk-pressure"}));},
+            _=>break,
+        }
+        let _=io::stdout().flush();
+    }
+    drop(receiver);let _=reader.await;
+    for mut peer in recovery_servers { peer.stop().await; }
+    for peer_controller in recovery_controllers { peer_controller.shutdown(); }
     server.stop().await;
     controller.shutdown();
     if mixed {

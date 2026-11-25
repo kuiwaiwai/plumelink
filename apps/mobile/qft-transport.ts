@@ -1,4 +1,4 @@
-import { t } from "../../shared/i18n";
+import { displayMessage, t } from "../../shared/i18n";
 import type { Command } from "../../shared/protocol";
 export type Motion = { dx: number; dy: number; scroll: number };
 import wasmUrl from "./generated/qft.wasm?url";
@@ -90,6 +90,9 @@ type ActionJob = {
   reject(error: Error): void;
   stagedPayload?: string;
   stagedLength?: number;
+  stage?: number;
+  actionId?: number;
+  failure?: string;
 };
 type Job = MotionJob | ActionJob;
 type Socket = Pick<
@@ -153,6 +156,27 @@ export class QftTransport {
       return;
     }
     this.timer = setTimeout(() => this.abort(t('传输初始化超时')), 3000);
+  }
+  receiveFailure(value: Record<string, unknown>) {
+    // Only the core outcome settles the action; this note explains its failure.
+    const action = this.action;
+    if (this.stopped || !action || action.actionId === undefined ||
+      value.session !== this.capability.session || value.lease !== this.lease ||
+      value.stage !== action.stage || value.actionId !== action.actionId) return;
+    const messages = [
+      "此应用需要管理员权限，请在电脑端启动",
+      "应用文件已移动或删除，请在电脑端重新添加",
+      "应用入口已移除，请刷新列表",
+      "快捷入口已移除，请刷新列表",
+      "文件夹已移动或删除，请在电脑端重新添加",
+      "无法打开文件夹，请在电脑端检查访问权限",
+      "无法启动应用，请在电脑端检查该应用是否可用",
+      "Windows 拒绝输入：请检查锁屏、UAC 或管理员窗口",
+      "管理员控制未启用",
+      "管理员控制未启用或已到期",
+    ];
+    if (typeof value.message === "string" && messages.includes(value.message))
+      action.failure = value.message;
   }
   receive(bytes: ArrayBuffer) {
     if (this.stopped) return;
@@ -327,7 +351,9 @@ export class QftTransport {
           new Error(
             outcome === 2
               ? t('操作未执行')
-              : t('操作结果未知，请确认电脑状态；不会自动重发'),
+              : action.failure
+                ? displayMessage(action.failure) + "\n" + t('结果未确认，请检查电脑；不会自动重发')
+                : t('操作结果未知，请确认电脑状态；不会自动重发'),
           ),
         );
     }
@@ -411,6 +437,7 @@ export class QftTransport {
             return;
           }
           this.stageId = next;
+          job.stage = next;
           this.action = job;
           this.queue.splice(0, prefix ? 2 : 1);
           try {
@@ -449,6 +476,9 @@ export class QftTransport {
       }
       if (count === 1) {
         const bytes = this.wasmViews().output.slice();
+        const frame = new DataView(bytes.buffer);
+        if (frame.getUint8(4) === 3 && this.action && frame.getInt32(44, true) === this.action.stage)
+          this.action.actionId = frame.getUint32(24, true);
         try {
           this.socket.send(bytes.buffer);
         } catch {

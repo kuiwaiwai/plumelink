@@ -1,0 +1,4 @@
+<resources>
+    <string name="ui_audio_usb_interrupted">電腦音訊連線已中斷，請檢查資料線和電腦端的 USB 有線連線設定，再重新開啟麥克風</string>
+    <string name="ui_audio_connection_interrupted">電腦音訊連線沒有回應，請檢查連線後重新開啟麥克風</string>
+</resources>

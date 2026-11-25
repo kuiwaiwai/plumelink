@@ -42,6 +42,24 @@ final class NativeIcon extends Drawable {
 
     static Path parse(String id) { return PathParser.createPathFromPathData(data(id)); }
 
+    static final class Cache {
+        private String id;
+        private int color, size;
+        private boolean initialized;
+        private Drawable drawable;
+
+        Drawable get(String id, int color, int size) {
+            if (!initialized || !java.util.Objects.equals(this.id, id) || this.color != color || this.size != size) {
+                this.id = id;
+                this.color = color;
+                this.size = size;
+                drawable = of(id, color, size);
+                initialized = true;
+            }
+            return drawable;
+        }
+    }
+
     @Override public void draw(Canvas canvas) {
         canvas.save();
         canvas.translate(getBounds().left, getBounds().top);
@@ -56,6 +74,10 @@ final class NativeIcon extends Drawable {
 
     private static String data(String id) {
         switch (id) {
+            case "alert-circle": return "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M12 8v4 M12 16h.01";
+            case "check-circle": return "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M9 12l2 2 4-4";
+            case "check": return "M6 12l4 4 8-8";
+            case "sort": return "M8 6h12 M8 12h9 M8 18h6 M3 4v16 M1 18l2 2 2-2";
             case "mic-off": return "M2 2L22 22 M9 9V11a3 3 0 0 0 5 2 M15 9V5a3 3 0 0 0 -5.9 -.8 M5 10v2a7 7 0 0 0 12 4.9 M19 10v2 M12 19v3";
             case "lock": return "M7 11V7a5 5 0 0 1 10 0v4 M5 11h14a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Z M12 15v2";
             case "close": return "M6 6L18 18 M18 6L6 18";
@@ -74,6 +96,9 @@ final class NativeIcon extends Drawable {
             case "mute": return "M11 4.702a.7 .7 0 0 0 -1.203 -.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0 -1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997 .413l3.383 3.384A.7 .7 0 0 0 11 19.298z M0 0 m16.5 14.5 5-5 M0 0 m16.5 9.5 5 5";
             case "louder": return "M11 4.702a.705 .705 0 0 0 -1.203 -.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0 -1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997 .413l3.383 3.384A.705 .705 0 0 0 11 19.298z M16 9a5 5 0 0 1 0 6 M19.364 18.364a9 9 0 0 0 0 -12.728";
             case "prev": return "M0 0 m15 18-6-6 6-6";
+            case "previous": return "M19 20 9 12l10-8z M5 19V5";
+            case "nexttrack": return "m5 4 10 8-10 8z M19 5v14";
+            case "stop": return "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z";
             case "play": return "M5 5a2 2 0 0 1 3.008 -1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z";
             case "next": return "M0 0 m9 18 6-6-6-6";
             case "focus": return "M15 3h6v6 M0 0 m21 3-7 7 M0 0 m3 21 7-7 M9 21H3v-6";

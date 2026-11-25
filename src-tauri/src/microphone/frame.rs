@@ -7,6 +7,7 @@ pub struct FrameGuard {
     sequence: u32,
     timestamp: u32,
     anchor: Option<(Instant, u32)>,
+    window_started: Option<Instant>,
     window_best: Option<(Instant, u32, i64)>,
 }
 impl FrameGuard {
@@ -42,13 +43,15 @@ impl FrameGuard {
         {
             self.window_best = Some((now, timestamp, age));
         }
-        if elapsed > 30_000 {
+        let window_started = *self.window_started.get_or_insert(now);
+        if now.duration_since(window_started).as_millis() > 30_000 {
             self.anchor = Some(
                 self.window_best
                     .take()
                     .map(|(best_now, best_ts, _)| (best_now, best_ts))
                     .unwrap_or((now, timestamp)),
             );
+            self.window_started = Some(now);
         }
         Ok(Some(&bytes[12..]))
     }
@@ -86,5 +89,33 @@ mod tests {
             .accept(&packet(4, 40_000), start + Duration::from_millis(40_010))
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn a_late_packet_after_a_window_boundary_cannot_reset_the_freshness_budget() {
+        let mut guard = FrameGuard::default();
+        let start = Instant::now();
+        assert!(guard.accept(&packet(1, 0), start).unwrap().is_some());
+        for index in 1..=1500 {
+            let timestamp = index * 20;
+            assert!(guard.accept(&packet(index + 1, timestamp), start + Duration::from_millis(u64::from(timestamp) + 10)).unwrap().is_some());
+        }
+        assert!(guard.accept(&packet(1502, 30_020), start + Duration::from_millis(30_160)).unwrap().is_some());
+        assert!(guard.accept(&packet(1503, 30_040), start + Duration::from_millis(30_320)).unwrap().is_none(), "280 ms late audio must not fit a 150 ms freshness budget");
+        assert!(guard.accept(&packet(1504, 30_340), start + Duration::from_millis(30_350)).unwrap().is_some(), "fresh capture should recover without replaying old audio");
+    }
+
+    #[test]
+    fn sustained_capture_tracks_clock_drift_in_both_directions() {
+        let start = Instant::now();
+        for drift_ppm in [-500i64, 500] {
+            let mut guard = FrameGuard::default();
+            for index in 0..=30_000 {
+                let timestamp = index * 20;
+                let arrival_ms = i64::from(timestamp) + i64::from(timestamp) * drift_ppm / 1_000_000 + 10;
+                let arrival = start + Duration::from_millis(arrival_ms as u64);
+                assert!(guard.accept(&packet(index + 1, timestamp), arrival).unwrap().is_some(), "capture at {timestamp} ms with {drift_ppm} ppm skew must remain fresh");
+            }
+        }
     }
 }

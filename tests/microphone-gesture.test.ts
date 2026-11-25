@@ -32,3 +32,15 @@ it('a short tap and swipe never start capture; tapping while locked stops it', (
   mic.down(20, 20, 200); mic.up(270);
   expect(events).toEqual(['stop']);
 });
+
+it("resets native terminal state without sending another stop", () => {
+  const events: string[] = [];
+  const gesture = new MicrophoneGesture(event => events.push(event));
+  gesture.down(0, 0, 0); gesture.tick(240);
+  gesture.restoreLocked();
+  gesture.reset();
+  expect(gesture.mode).toBe("idle"); expect(gesture.intent).toBe(null); expect(gesture.progress).toBe(0);
+  expect(events).toEqual(["start"]);
+  gesture.down(0, 0, 1000); gesture.tick(1240); gesture.cancel();
+  expect(events).toEqual(["start", "start", "stop"]);
+});

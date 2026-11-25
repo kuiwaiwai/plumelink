@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
+import { languagePreference, t } from "../shared/i18n";
 import {
   QftTransport,
   supportsQft,
@@ -83,7 +84,95 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 });
 afterEach(() => {
+  languagePreference.value = "zh-CN";
   vi.useRealTimers();
+});
+
+function failureFor(packet: ArrayBuffer) {
+  const frame = new DataView(packet);
+  return { session: "7", lease: frame.getUint32(16, true), actionId: frame.getUint32(24, true),
+    stage: frame.getInt32(44, true), message: "此应用需要管理员权限，请在电脑端启动" };
+}
+function confirmFailure(s: ReturnType<typeof setup>, packet: ArrayBuffer, status: number) {
+  s.transport.receive(ack(packet, status));
+  vi.advanceTimersByTime(16);
+  const probe = s.packets().at(-1)!;
+  expect(new DataView(probe).getUint8(4)).toBe(7);
+  s.transport.receive(ack(probe, status));
+}
+
+it.each(["zh-CN", "zh-TW", "en"])("only enriches an unknown outcome after matching binary evidence (%s)", async (language) => {
+  languagePreference.value = language;
+  const s = setup();
+  const settled = vi.fn();
+  const result = s.transport.send({ type: "launch", id: "a".repeat(32) }).catch(error => error.message).then(value => { settled(value); return value; });
+  const packet = s.packets()[0];
+  s.transport.receiveFailure(failureFor(packet));
+  await Promise.resolve();
+  expect(settled).not.toHaveBeenCalled();
+  confirmFailure(s, packet, 6);
+  const message = await result;
+  expect(message).toContain(language === "en" ? "Start it on your PC" : language === "zh-TW" ? "系統管理員權限" : "管理员权限");
+  expect(message).toContain(language === "en" ? "not be resent" : language === "zh-TW" ? "不會自動重發" : "不会自动重发");
+  expect(s.sent.filter(value => typeof value === "string" && JSON.parse(value).kind === "qftStage")).toHaveLength(1);
+  s.transport.dispose();
+});
+
+it.each(["zh-CN", "zh-TW", "en"])("folder failures retain uncertainty and never resend (%s)", async language => {
+  languagePreference.value = language;
+  const s = setup();
+  const result = s.transport.send({ type: "launch", id: "d".repeat(32) }).catch(error => error.message);
+  const packet = s.packets()[0];
+  const reason = "无法打开文件夹，请在电脑端检查访问权限";
+  s.transport.receiveFailure({ ...failureFor(packet), message: reason });
+  confirmFailure(s, packet, 6);
+  expect(await result).toBe(t(reason) + "\n" + t("结果未确认，请检查电脑；不会自动重发"));
+  expect(s.sent.filter(value => typeof value === "string" && JSON.parse(value).kind === "qftStage")).toHaveLength(1);
+  s.transport.dispose();
+});
+
+it.each([
+  { session: "8" }, { lease: 2 }, { stage: 2 }, { actionId: 2 },
+  { actionId: "1" }, { stage: null }, { message: "private local path" },
+])("ignores unrelated or unrecognized failure details %j", async (change) => {
+  const s = setup();
+  const result = s.transport.send({ type: "key", key: "enter" }).catch(error => error.message);
+  const packet = s.packets()[0];
+  s.transport.receiveFailure({ ...failureFor(packet), ...change });
+  confirmFailure(s, packet, 6);
+  expect(await result).toBe("操作结果未知，请确认电脑状态；不会自动重发");
+  s.transport.dispose();
+});
+
+it.each([1, 2])("a failure note cannot override a core outcome %s", async (status) => {
+  const s = setup();
+  const result = s.transport.send({ type: "key", key: "enter" }).then(() => "committed", error => error.message);
+  const packet = s.packets()[0];
+  s.transport.receiveFailure(failureFor(packet));
+  if (status === 1) s.transport.receive(ack(packet, status));
+  else confirmFailure(s, packet, status);
+  expect(await result).toBe(status === 1 ? "committed" : "操作未执行");
+  s.transport.dispose();
+});
+
+it("does not carry failure notes into subsequent actions or a disconnect", async () => {
+  const s = setup();
+  const first = s.transport.send({ type: "key", key: "enter" });
+  const packet = s.packets()[0];
+  s.transport.receiveFailure(failureFor(packet));
+  s.transport.receive(ack(packet, 1));
+  await first;
+  const next = s.transport.send({ type: "key", key: "enter" }).catch(error => error.message);
+  vi.advanceTimersByTime(16);
+  s.transport.receiveFailure(failureFor(packet));
+  confirmFailure(s, s.packets().at(-1)!, 6);
+  expect(await next).toBe("操作结果未知，请确认电脑状态；不会自动重发");
+  s.transport.dispose();
+  const disconnected = setup();
+  const result = disconnected.transport.send({ type: "key", key: "enter" }).catch(error => error.message);
+  disconnected.transport.receiveFailure(failureFor(disconnected.packets()[0]));
+  disconnected.transport.dispose();
+  expect(await result).toBe("连接中断，操作结果可能未知；不会自动重发");
 });
 
 it("retunes the live pacer while an action awaits confirmation", async () => {

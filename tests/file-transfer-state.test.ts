@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { computed, nextTick, ref } from "vue";
-import { useFileTransfers } from "../apps/mobile/composables/useFileTransfers";
+import { languagePreference } from "../shared/i18n";
+import * as fileTransfer from "../apps/mobile/file-transfer";
+import { downloadRecoveryLabel, downloadRecoveryStatus, useFileTransfers } from "../apps/mobile/composables/useFileTransfers";
 
 const lifecycle = vi.hoisted(() => ({ destroy: [] as (() => void)[] }));
 let receiveFolderSelected = true;
@@ -15,8 +17,11 @@ const native = {
   getReceiveFolder: () => receiveFolderLabel,
   hasReceiveFolder: () => receiveFolderSelected,
   downloadFile: vi.fn(),
+  chooseUploadFiles: vi.fn(),
   cancelFileTransfer: vi.fn(),
   syncSession: vi.fn(),
+  refreshReceiveFolder: vi.fn(),
+  resolveUnfinishedDownload: vi.fn(),
 };
 const remote = {
   api: vi.fn(),
@@ -33,6 +38,49 @@ beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() });
   vi.stubGlobal("PlumeLinkAndroid", native);
+});
+
+it("validates local unfinished files and keeps cleanup available without a PC connection", () => {
+  const transfers = useFileTransfers(remote, ref(false), ref(false));
+  const file = { id: "a".repeat(32), name: "notes.bin", size: 8, expected: 16, available: true, version: "b".repeat(64) };
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { files: [file, file, { ...file, id: "../../other" }], message: "" } }));
+  expect(transfers.unfinishedDownloads.value).toEqual([file]);
+  transfers.resolveUnfinishedDownload(file, true);
+  const request = native.resolveUnfinishedDownload.mock.calls[0][3];
+  expect(native.resolveUnfinishedDownload).toHaveBeenCalledWith(file.id, file.version, true, request);
+  expect(transfers.recoveryBusy.value).toBe(true);
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { request, files: [], message: "" } }));
+  expect(transfers.recoveryBusy.value).toBe(false);
+  expect(transfers.unfinishedDownloads.value).toEqual([]);
+});
+
+it("does not replay timed out cleanup or let its late response release a newer request", () => {
+  vi.useFakeTimers();
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  const file = { id: "a".repeat(32), name: "notes.bin", size: 8, expected: 16, available: true, version: "b".repeat(64) };
+  transfers.resolveUnfinishedDownload(file, false);
+  const first = native.resolveUnfinishedDownload.mock.calls[0][3];
+  transfers.resolveUnfinishedDownload(file, false);
+  expect(native.resolveUnfinishedDownload).toHaveBeenCalledTimes(1);
+  vi.advanceTimersByTime(15_000);
+  expect(transfers.recoveryBusy.value).toBe(false);
+  expect(native.resolveUnfinishedDownload).toHaveBeenCalledTimes(1);
+  transfers.resolveUnfinishedDownload(file, true);
+  const second = native.resolveUnfinishedDownload.mock.calls[1][3];
+  expect(second).not.toBe(first);
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { request: first, files: [], message: "old" } }));
+  expect(transfers.recoveryBusy.value).toBe(true);
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { request: second, files: [], message: "current" } }));
+  expect(transfers.recoveryBusy.value).toBe(false);
+  expect(transfers.recoveryMessage.value).toBe("current");
+});
+
+it("releases local cleanup controls if the Android call fails before dispatch", () => {
+  native.resolveUnfinishedDownload.mockImplementationOnce(() => { throw new Error("native unavailable"); });
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  transfers.resolveUnfinishedDownload({ id: "a".repeat(32), name: "notes.bin", size: 8, expected: 16, available: true, version: "b".repeat(64) }, true);
+  expect(transfers.recoveryBusy.value).toBe(false);
+  expect(transfers.recoveryMessage.value).toBe("native unavailable");
 });
 
 it("requires a selected Android folder before starting a download and recovers after selection", () => {
@@ -77,8 +125,51 @@ it("updates Android folder availability without restarting or ending a file tran
   expect(transfers.transferProgress.value).toBe(37);
   expect(native.syncSession).not.toHaveBeenCalled();
 });
+
+it("checks local folder availability on file refresh even without PC file permission", async () => {
+  const transfers = useFileTransfers(remote, ref(false), ref(false));
+  native.refreshReceiveFolder.mockClear();
+  await transfers.loadFiles();
+  expect(native.refreshReceiveFolder).toHaveBeenCalledOnce();
+  receiveFolderSelected = false;
+  receiveFolderLabel = "接收目录不可用，请重新选择。";
+  window.dispatchEvent(new Event("plumelink-native-folder"));
+  expect(transfers.folderReady.value).toBe(false);
+  expect(transfers.androidFolder.value).toBe(receiveFolderLabel);
+  expect(transfers.transferBusy.value).toBe(false);
+});
+
+it("refreshes the directory without resetting an active transfer or requesting a task snapshot", async () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  transfers.downloadFile({ id: 7, name: "demo.txt", size: 10 });
+  window.dispatchEvent(new CustomEvent("plumelink-native-transfer", { detail: { done: false, progress: 37 } }));
+  remote.api.mockResolvedValue(new Response(JSON.stringify({ files: [] })));
+  native.refreshReceiveFolder.mockClear(); native.syncSession.mockClear();
+  await transfers.loadFiles();
+  expect(native.refreshReceiveFolder).toHaveBeenCalledOnce();
+  expect(native.syncSession).not.toHaveBeenCalled();
+  expect(transfers.transferBusy.value).toBe(true);
+  expect(transfers.transferProgress.value).toBe(37);
+});
+
+it("updates a deeply nested Android folder immediately without interrupting transfer progress", () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  transfers.downloadFile({ id: 7, name: "demo.txt", size: 10 });
+  const folder = "Documents/项目资料/Project Notes/".repeat(24);
+  window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
+    detail: { folder, done: false, progress: 37 },
+  }));
+  expect(transfers.androidFolder.value).toBe(folder);
+  expect(transfers.folderReady.value).toBe(true);
+  expect(transfers.transferBusy.value).toBe(true);
+  expect(transfers.transferProgress.value).toBe(37);
+  window.dispatchEvent(new CustomEvent("plumelink-native-transfer", { detail: { folder: "x".repeat(65536) } }));
+  expect(transfers.androidFolder.value).toBe(folder);
+});
 afterEach(() => {
+  languagePreference.value = "system";
   lifecycle.destroy.forEach(fn => fn());
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -112,7 +203,7 @@ it("does not let a non-boolean snapshot bypass late-event protection", () => {
   window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
     detail: { done: true, message: "late.bin 已保存", snapshot: "yes" },
   }));
-  expect(transfers.transferMessage.value).toContain("没有收到电脑确认");
+  expect(transfers.transferMessage.value).toContain("取消尚未完成");
   vi.useRealTimers();
 });
 it("accepts an authoritative in-flight snapshot and keeps the transfer busy", () => {
@@ -125,6 +216,22 @@ it("accepts an authoritative in-flight snapshot and keeps the transfer busy", ()
   expect(transfers.transferBusy.value).toBe(true);
   expect(transfers.transferProgress.value).toBe(37);
   expect(transfers.transferMessage.value).toBe("正在接收 restored.bin");
+});
+
+it.each([false, true])("times out a native upload first discovered by an event (snapshot=%s)", async snapshot => {
+  vi.useFakeTimers();
+  try {
+    const transfers = useFileTransfers(remote, ref(true), ref(false));
+    window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
+      detail: { done: false, progress: 0, message: "正在发送 picked.bin", snapshot },
+    }));
+    expect(transfers.transferBusy.value).toBe(true);
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    expect(native.cancelFileTransfer).toHaveBeenCalledOnce();
+    expect(transfers.transferBusy.value).toBe(false);
+    expect(transfers.canStartTransfer.value).toBe(false);
+    expect(transfers.transferMessage.value).toContain("已请求停止");
+  } finally { vi.useRealTimers(); }
 });
 
 it("accepts a completed snapshot and clears the native transfer state", () => {
@@ -203,7 +310,7 @@ it("ends a native cancellation after the acknowledgement watchdog expires", asyn
   transfers.cancelTransfer();
   await vi.advanceTimersByTimeAsync(15_000);
   expect(transfers.transferBusy.value).toBe(false);
-  expect(transfers.transferMessage.value).toContain("没有收到电脑确认");
+  expect(transfers.transferMessage.value).toContain("取消尚未完成");
   vi.useRealTimers();
 });
 
@@ -251,6 +358,57 @@ it("blocks a new native download until the timed-out transfer confirms it stoppe
   transfers.downloadFile({ id: 50, name: "new.bin", size: 20 });
   expect(native.downloadFile).toHaveBeenCalledTimes(2);
   vi.useRealTimers();
+});
+
+it("blocks uploads too while native cancellation is still unconfirmed", async () => {
+  vi.useFakeTimers();
+  try {
+    const upload = vi.spyOn(fileTransfer, "uploadResumable").mockResolvedValue("next.bin");
+    const transfers = useFileTransfers(remote, ref(true), ref(false));
+    transfers.downloadFile({ id: 54, name: "previous.bin", size: 20 });
+    transfers.cancelTransfer();
+    await vi.advanceTimersByTimeAsync(15_000);
+    const input = { files: [{ name: "next.bin", size: 5 }], value: "" } as unknown as HTMLInputElement;
+    await transfers.uploadFiles({ target: input } as unknown as Event);
+    expect(upload).not.toHaveBeenCalled();
+    expect(transfers.transferMessage.value).toContain("上一项传输仍在停止");
+    window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
+      detail: { done: true, succeeded: false, message: "已取消传输" },
+    }));
+    await transfers.uploadFiles({ target: input } as unknown as Event);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(transfers.transferMessage.value).toBe("next.bin 已保存到电脑");
+  } finally { vi.useRealTimers(); }
+});
+
+it("keeps the native picker disabled until a refreshed snapshot confirms the previous task ended", async () => {
+  vi.useFakeTimers();
+  try {
+    const allowed = ref(true);
+    const transfers = useFileTransfers(remote, allowed, ref(false));
+    transfers.downloadFile({ id: 55, name: "stopping.bin", size: 20 });
+    transfers.cancelTransfer();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(transfers.transferBusy.value).toBe(false);
+    expect(transfers.canStartTransfer.value).toBe(false);
+    transfers.chooseUploadFiles();
+    expect(native.chooseUploadFiles).not.toHaveBeenCalled();
+    native.syncSession.mockClear();
+    remote.api.mockResolvedValueOnce({ ok: true, json: async () => ({ files: [] }) });
+    native.syncSession.mockImplementationOnce(() => window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
+      detail: { done: true, snapshot: true, succeeded: false, message: "已取消传输" },
+    })));
+    await transfers.loadFiles();
+    expect(native.syncSession).toHaveBeenCalledOnce();
+    expect(transfers.canStartTransfer.value).toBe(true);
+    transfers.chooseUploadFiles();
+    expect(native.chooseUploadFiles).toHaveBeenCalledOnce();
+    allowed.value = false;
+    await nextTick();
+    expect(transfers.canStartTransfer.value).toBe(false);
+    transfers.chooseUploadFiles();
+    expect(native.chooseUploadFiles).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
 });
 
 it("clears the cancellation watchdog when file permission is revoked", async () => {
@@ -484,4 +642,137 @@ it("expires successful feedback once, keeps history, and preserves later errors"
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("validates the whole upload selection before sending any file", async () => {
+  const send = vi.spyOn(fileTransfer, "uploadResumable");
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  const input = { files: [{ name: "first.txt", size: 10 }, { name: "oversize.bin", size: fileTransfer.MAX_FILE_BYTES + 1 }], value: "selected" };
+  await transfers.uploadFiles({ target: input } as unknown as Event);
+  expect(send).not.toHaveBeenCalled();
+  expect(transfers.transferBusy.value).toBe(false);
+  expect(transfers.transferMessage.value).toContain("oversize.bin");
+  expect(input.value).toBe("");
+});
+
+it("keeps batch progress across files and reports a partial failure", async () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  const values: number[] = [];
+  vi.spyOn(fileTransfer, "uploadResumable").mockImplementation(async (file, options) => {
+    options.progress(0, false);
+    values.push(transfers.transferProgress.value);
+    options.progress(file.size, false);
+    values.push(transfers.transferProgress.value);
+    if (file.name === "second.txt") throw new Error("电脑没有响应");
+    return file.name;
+  });
+  const input = { files: [{ name: "first.txt", size: 10 }, { name: "second.txt", size: 10 }], value: "" };
+  await transfers.uploadFiles({ target: input } as unknown as Event);
+  expect(values).toEqual([0, 50, 50, 99]);
+  expect(transfers.transferMessage.value).toBe("已发送 1/2 个文件。电脑没有响应");
+  expect(transfers.transferHistory.value).toEqual(["发送：first.txt"]);
+  expect(transfers.transferBusy.value).toBe(false);
+});
+
+it("clears cancellation and permits another upload after a batch is canceled", async () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  vi.spyOn(fileTransfer, "uploadResumable").mockImplementationOnce(async (_file, options) => {
+    transfers.cancelTransfer();
+    expect(options.signal.aborted).toBe(true);
+    throw new Error("已取消传输");
+  }).mockResolvedValueOnce("saved.txt");
+  const event = { target: { files: [{ name: "retry.txt", size: 10 }], value: "" } } as unknown as Event;
+  await transfers.uploadFiles(event);
+  expect(transfers.transferBusy.value).toBe(false);
+  expect(transfers.transferCancelling.value).toBe(false);
+  await transfers.uploadFiles(event);
+  expect(transfers.transferMessage.value).toBe("saved.txt 已保存到电脑");
+  expect(transfers.transferProgress.value).toBe(100);
+});
+
+it.each([1, 2])("keeps %i confirmed native uploads in history when the rest of a batch fails", completed => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  const message = `已发送 ${completed}/3 个文件。已取消传输`;
+  window.dispatchEvent(new CustomEvent("plumelink-native-transfer", { detail: {
+    done: true, succeeded: false, direction: "send", fileName: "confirmed.txt", fileCount: completed,
+    message, progress: Math.floor(completed * 100 / 3),
+  } }));
+  expect(transfers.transferMessage.value).toBe(message);
+  expect(transfers.transferBusy.value).toBe(false);
+  expect(transfers.transferHistory.value).toEqual([completed === 1 ? "发送：confirmed.txt" : "已发送 2 个文件"]);
+});
+
+it("does not record unconfirmed native batch files as sent", () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  for (const fileCount of [0, -1, 1.5, 17]) window.dispatchEvent(new CustomEvent("plumelink-native-transfer", { detail: {
+    done: true, succeeded: false, direction: "send", fileName: "unsent.txt", fileCount, message: "发送失败",
+  } }));
+  expect(transfers.transferHistory.value).toEqual([]);
+});
+
+it("aborts superseded list requests and ignores a late old response", async () => {
+  const transfers = useFileTransfers(remote, ref(true), ref(false));
+  let first!: (value: unknown) => void;
+  let oldSignal: AbortSignal | undefined;
+  remote.api.mockImplementationOnce((_path, init) => {
+    oldSignal = init.signal;
+    return new Promise(resolve => { first = resolve; });
+  }).mockResolvedValueOnce({ ok: true, json: async () => ({ files: [{ id: 2, name: "new.txt", size: 1 }] }) });
+  const pending = transfers.loadFiles();
+  await transfers.loadFiles();
+  expect(oldSignal?.aborted).toBe(true);
+  first({ ok: true, json: async () => ({ files: [{ id: 1, name: "old.txt", size: 1 }] }) });
+  await pending;
+  expect(transfers.sharedFiles.value.map(f => f.name)).toEqual(["new.txt"]);
+  expect(transfers.filesLoading.value).toBe(false);
+});
+it("aborts list requests when file access is revoked", async () => {
+  const allowed = ref(true);
+  const transfers = useFileTransfers(remote, allowed, ref(false));
+  let signal!: AbortSignal;
+  remote.api.mockImplementationOnce((_path, init) => new Promise((_resolve, reject) => {
+    signal = init.signal;
+    signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  }));
+  const pending = transfers.loadFiles();
+  allowed.value = false;
+  await nextTick();
+  await pending;
+  expect(signal.aborted).toBe(true);
+  expect(transfers.filesError.value).toBe("");
+  expect(transfers.filesLoading.value).toBe(false);
+});
+
+it("preserves pending publication receipts and rejects malformed uncertainty flags", () => {
+  const transfers = useFileTransfers(remote, ref(false), ref(false));
+  const file = { id: "a".repeat(32), name: "notes.bin", size: 16, expected: 16, available: true, version: "b".repeat(64), pendingCommit: true };
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { files: [
+    file,
+    { ...file, id: "c".repeat(32), pendingCommit: "true" },
+    { ...file, id: "d".repeat(32), pendingCommit: null },
+    { ...file, id: "e".repeat(32), pendingCommit: 1 },
+    { ...file, id: "f".repeat(32), pendingCommit: false },
+  ] } }));
+  expect(transfers.unfinishedDownloads.value.map(entry => [entry.id, entry.pendingCommit])).toEqual([[file.id, true], ["f".repeat(32), false]]);
+  const pending = transfers.unfinishedDownloads.value[0];
+  expect(downloadRecoveryStatus(pending)).toBe("保存结果待确认");
+  expect(downloadRecoveryLabel(transfers.unfinishedDownloads.value)).toBe("2 个待核对文件");
+  transfers.resolveUnfinishedDownload(pending, false);
+  const request = native.resolveUnfinishedDownload.mock.calls[0][3];
+  expect(native.resolveUnfinishedDownload).toHaveBeenCalledWith(file.id, file.version, false, request);
+  window.dispatchEvent(new CustomEvent("plumelink-download-recovery", { detail: { request, files: [], message: "" } }));
+  expect(transfers.recoveryBusy.value).toBe(false);
+});
+
+it.each([
+  ["zh-CN", "保存结果待确认", "1 个待核对文件"],
+  ["zh-TW", "儲存結果待確認", "1 個待核對檔案"],
+  ["en", "Save result not confirmed", "Files to review: 1"],
+] as const)("keeps full-size but unconfirmed files distinct in %s", (language, status, label) => {
+  languagePreference.value = language;
+  const file = { id: "a".repeat(32), name: "notes.bin", size: 16, expected: 16, available: true, version: "b".repeat(64), pendingCommit: true };
+  expect(downloadRecoveryStatus(file)).toBe(status);
+  expect(downloadRecoveryLabel([file])).toBe(label);
+  expect(downloadRecoveryStatus({ ...file, pendingCommit: false })).toContain("16 B / 16 B");
+  expect(downloadRecoveryStatus({ ...file, available: false })).toBe(status);
 });

@@ -5,14 +5,14 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{atomic::{AtomicBool,Ordering},Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{watch, OwnedSemaphorePermit, Semaphore},
     time::{Instant, Sleep},
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
@@ -44,13 +44,78 @@ pub struct LimitedListener {
     slots: Arc<Semaphore>,
     per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
 }
-#[derive(Clone, Copy)]
-pub struct Peer(pub SocketAddr);
+#[derive(Clone)]
+pub struct Peer(pub SocketAddr,pub(crate) Option<Arc<AtomicBool>>);
+impl Peer {
+    pub(crate) fn websocket_close_grace(&self) {if let Some(flag)=&self.1 {flag.store(true,Ordering::Release);}}
+}
+pub struct CancelListener<L> {
+    inner: L,
+    stop: watch::Receiver<bool>,
+}
+impl<L> CancelListener<L> {
+    pub fn new(inner:L,stop:watch::Receiver<bool>)->Self {Self{inner,stop}}
+}
+impl<L:axum::serve::Listener> axum::serve::Listener for CancelListener<L> {
+    type Io=CancelStream<L::Io>;
+    type Addr=L::Addr;
+    async fn accept(&mut self)->(Self::Io,Self::Addr) {
+        let (stream,address)=self.inner.accept().await;
+        (CancelStream::new(stream,self.stop.clone()),address)
+    }
+    fn local_addr(&self)->io::Result<Self::Addr> {self.inner.local_addr()}
+}
+impl<L:axum::serve::Listener<Addr=SocketAddr>> axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_,CancelListener<L>>> for Peer {
+    fn connect_info(stream:axum::serve::IncomingStream<'_,CancelListener<L>>)->Self {Self(*stream.remote_addr(),Some(stream.io().websocket.clone()))}
+}
+pub struct CancelStream<S> {
+    inner:S,
+    stop:Pin<Box<dyn Future<Output=()>+Send>>,
+    stopped:bool,
+    websocket:Arc<AtomicBool>,
+    close_deadline:Option<Pin<Box<Sleep>>>,
+}
+impl<S> CancelStream<S> {
+    fn new(inner:S,mut signal:watch::Receiver<bool>)->Self {
+        let stop=Box::pin(async move {while !*signal.borrow_and_update() {if signal.changed().await.is_err(){break;}}});
+        Self{inner,stop,stopped:false,websocket:Arc::new(AtomicBool::new(false)),close_deadline:None}
+    }
+    fn stopped(&mut self,cx:&mut Context<'_>)->bool {
+        if !self.stopped {self.stopped=self.stop.as_mut().poll(cx).is_ready();}
+        self.stopped
+    }
+    fn write_stopped(&mut self,cx:&mut Context<'_>)->bool {
+        if !self.stopped(cx) {return false;}
+        if !self.websocket.load(Ordering::Acquire) {return true;}
+        self.close_deadline.get_or_insert_with(||Box::pin(tokio::time::sleep(Duration::from_millis(500)))).as_mut().poll(cx).is_ready()
+    }
+}
+fn connection_stopped()->io::Error {io::Error::new(io::ErrorKind::ConnectionAborted,"connection stopped")}
+impl<S:AsyncRead+Unpin> AsyncRead for CancelStream<S> {
+    fn poll_read(mut self:Pin<&mut Self>,cx:&mut Context<'_>,buf:&mut ReadBuf<'_>)->Poll<io::Result<()>> {
+        if self.stopped(cx) {Poll::Ready(Err(connection_stopped()))} else {Pin::new(&mut self.inner).poll_read(cx,buf)}
+    }
+}
+impl<S:AsyncWrite+Unpin> AsyncWrite for CancelStream<S> {
+    fn poll_write(mut self:Pin<&mut Self>,cx:&mut Context<'_>,buf:&[u8])->Poll<io::Result<usize>> {
+        if self.write_stopped(cx) {Poll::Ready(Err(connection_stopped()))} else {Pin::new(&mut self.inner).poll_write(cx,buf)}
+    }
+    fn poll_write_vectored(mut self:Pin<&mut Self>,cx:&mut Context<'_>,buf:&[io::IoSlice<'_>])->Poll<io::Result<usize>> {
+        if self.write_stopped(cx) {Poll::Ready(Err(connection_stopped()))} else {Pin::new(&mut self.inner).poll_write_vectored(cx,buf)}
+    }
+    fn is_write_vectored(&self)->bool {self.inner.is_write_vectored()}
+    fn poll_flush(mut self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<io::Result<()>> {
+        if self.write_stopped(cx) {Poll::Ready(Err(connection_stopped()))} else {Pin::new(&mut self.inner).poll_flush(cx)}
+    }
+    fn poll_shutdown(mut self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<io::Result<()>> {
+        if self.stopped(cx) {Poll::Ready(Ok(()))} else {Pin::new(&mut self.inner).poll_shutdown(cx)}
+    }
+}
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, LimitedListener>>
     for Peer
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, LimitedListener>) -> Self {
-        Self(*stream.remote_addr())
+        Self(*stream.remote_addr(),None)
     }
 }
 fn acquire_ip_slot(
@@ -72,9 +137,12 @@ fn acquire_ip_slot(
 
 impl LimitedListener {
     pub fn new(listener: TcpListener) -> Self {
+        Self::with_slots(listener,Arc::new(Semaphore::new(32)))
+    }
+    pub(crate) fn with_slots(listener:TcpListener,slots:Arc<Semaphore>)->Self {
         Self {
             listener,
-            slots: Arc::new(Semaphore::new(32)),
+            slots,
             per_ip: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -198,8 +266,11 @@ pub struct TlsListener {
 }
 impl TlsListener {
     pub fn new(listener: TcpListener, config: Arc<rustls::ServerConfig>) -> Self {
+        Self::with_slots(listener,config,Arc::new(Semaphore::new(32)))
+    }
+    pub(crate) fn with_slots(listener:TcpListener,config:Arc<rustls::ServerConfig>,slots:Arc<Semaphore>)->Self {
         Self {
-            listener: LimitedListener::new(listener),
+            listener: LimitedListener::with_slots(listener,slots),
             acceptor: TlsAcceptor::from(config),
             handshakes: FuturesUnordered::new(),
             pending_per_ip: Arc::new(Mutex::new(HashMap::new())),
@@ -240,7 +311,7 @@ impl axum::serve::Listener for TlsListener {
 }
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>> for Peer {
     fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
-        Self(*stream.remote_addr())
+        Self(*stream.remote_addr(),None)
     }
 }
 
@@ -248,6 +319,46 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsL
 mod tests {
     use super::*;
     use axum::serve::Listener;
+    #[tokio::test]
+    async fn endpoint_cancel_wakes_pending_reads_and_rejects_buffered_io() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let (stop,signal)=watch::channel(false);let (inner,mut peer)=tokio::io::duplex(16);
+        let mut stream=CancelStream::new(inner,signal);
+        let reading=tokio::spawn(async move {let mut byte=[0];let result=stream.read(&mut byte).await;(stream,result)});
+        tokio::task::yield_now().await;stop.send(true).unwrap();
+        let (mut stream,result)=tokio::time::timeout(Duration::from_secs(1),reading).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().kind(),io::ErrorKind::ConnectionAborted);
+        peer.write_all(b"queued").await.unwrap();
+        assert!(stream.read(&mut [0]).await.is_err());assert!(stream.write_all(b"late").await.is_err());assert!(stream.flush().await.is_err());
+    }
+    #[tokio::test]
+    async fn cancellation_is_per_endpoint_and_wakes_a_backpressured_write() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let (stop,signal)=watch::channel(false);let (inner,_peer)=tokio::io::duplex(1);let mut stream=CancelStream::new(inner,signal);
+        let writing=tokio::spawn(async move {stream.write_all(b"blocked bytes").await});
+        let (_other_stop,other_signal)=watch::channel(false);let (inner,mut peer)=tokio::io::duplex(16);let mut other=CancelStream::new(inner,other_signal);
+        tokio::task::yield_now().await;stop.send(true).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1),writing).await.unwrap().unwrap().is_err());
+        other.write_all(b"ok").await.unwrap();let mut received=[0;2];peer.read_exact(&mut received).await.unwrap();assert_eq!(&received,b"ok");
+    }
+    #[tokio::test]
+    async fn websocket_cancellation_allows_a_bounded_close_frame_but_no_further_reads() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let (stop,signal)=watch::channel(false);let (inner,mut peer)=tokio::io::duplex(16);let mut stream=CancelStream::new(inner,signal);
+        stream.websocket.store(true,Ordering::Release);stop.send(true).unwrap();
+        assert!(stream.read(&mut [0]).await.is_err());stream.write_all(b"close").await.unwrap();
+        let mut bytes=[0;5];peer.read_exact(&mut bytes).await.unwrap();assert_eq!(&bytes,b"close");
+        assert!(tokio::time::timeout(Duration::from_secs(1),stream.write_all(&[0;64])).await.unwrap().is_err());
+    }
+    #[tokio::test]
+    async fn multiple_listeners_share_and_release_their_connection_budget() {
+        let budget=Arc::new(Semaphore::new(2));let first=TcpListener::bind("127.0.0.1:0").await.unwrap();let second=TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (first_address,second_address)=(first.local_addr().unwrap(),second.local_addr().unwrap());
+        let mut first=LimitedListener::with_slots(first,budget.clone());let mut second=LimitedListener::with_slots(second,budget.clone());
+        let (_client,(one,_))=tokio::join!(TcpStream::connect(first_address),first.accept());let (_client,(two,_))=tokio::join!(TcpStream::connect(second_address),second.accept());assert_eq!(budget.available_permits(),0);
+        let rejected=TcpStream::connect(second_address).await.unwrap();assert!(tokio::time::timeout(Duration::from_millis(80),second.accept()).await.is_err());drop(rejected);drop(one);
+        let (_client,(replacement,_))=tokio::join!(TcpStream::connect(second_address),second.accept());drop(two);drop(replacement);assert_eq!(budget.available_permits(),2);
+    }
 
     #[tokio::test]
     async fn accepted_connections_disable_nagle() {

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="ui_reinstalled_pc_trust">电脑身份或证书已变化，重装电脑端后可能出现此情况。请与电脑端核对指纹后重新信任，仅需重新配对此电脑，不影响其它电脑。若没有重装或更换电脑，请取消连接。</string>
+    <string name="ui_verify_usb_pc">"请与电脑「偏好设置 → USB 有线连接 → 核对电脑证书」中的地址和证书核对。\n\n"</string>
+    <string name="ui_usb_connection">USB 有线连接</string>
+    <string name="ui_connect_wirelessly">通过无线连接</string>
+    <string name="ui_usb_help">USB 连接：使用数据线连接电脑，在手机开发者选项中开启 USB 调试并允许这台电脑。打开电脑羽连的「偏好设置 → USB 有线连接」，选择这台手机并连接。首次使用仍需确认电脑并输入配对码。</string>
     <string name="ui_expand_sheet">展开抽屉</string>
     <string name="ui_collapse_sheet">收起抽屉</string>
     <string name="ui_remote_connection_active">遥控连接正在运行</string>
@@ -40,7 +45,10 @@
     <string name="ui_previously_connected_pc">"已连接过的电脑"</string>
     <string name="ui_new_device">"新设备"</string>
     <string name="ui_recognized">"已识别"</string>
-    <string name="ui_address_updated">"地址已更新"</string>
+    <string name="ui_address_updated">"发现新地址"</string>
+    <string name="ui_pc_identity_changed">"电脑身份发生变化，已保留原有配对。请核对地址；若已重装电脑端，请移除旧记录后重新配对。"</string>
+    <string name="ui_not_plumelink_service">"此地址未返回羽连服务，请核对电脑端显示的地址和端口。"</string>
+    <string name="ui_verifying_pc">"正在核验电脑…"</string>
     <string name="ui_available">"可连接"</string>
     <string name="ui_unreachable">"暂不可达"</string>
     <string name="ui_search_failed">"搜索启动失败（"</string>
@@ -64,6 +72,8 @@
     <string name="ui_name_e_g_study_pc">"别名，例如：书房电脑"</string>
     <string name="ui_location_e_g_upstairs_study">"位置备注，例如：二楼书房"</string>
     <string name="ui_pc_name_and_location">"电脑名称与位置"</string>
+    <string name="ui_pc_name">"名称"</string>
+    <string name="ui_pc_location">"位置"</string>
     <string name="ui_save">"保存"</string>
     <string name="ui_pc_details_saved">"电脑信息已保存"</string>
     <string name="ui_clear">"清空"</string>
@@ -72,10 +82,12 @@
     <string name="ui_system_file_picker_unavailable">"未找到系统文件选择器"</string>
     <string name="ui_choose_a_download_folder">"未设置，请选择目录"</string>
     <string name="ui_selected">"已选择："</string>
+    <string name="ui_internal_storage">内部存储空间</string>
+    <string name="ui_external_storage">外部存储空间</string>
     <string name="ui_android_download_folder_selected">"已选择 Android 保存目录"</string>
     <string name="ui_android_download_folder_unavailable">接收目录不可用，请重新选择。</string>
     <string name="ui_notifications_are_off_enable_them_in_connection_help_fo">"未开启通知权限，后台传输或麦克风状态不会显示在通知栏，可在连接帮助中前往开启"</string>
-    <string name="ui_microphone_permission_granted_press_and_hold_again">"麦克风权限已开启，请再次点按开启"</string>
+    <string name="ui_microphone_permission_granted_press_and_hold_again">已允许录音，请再次开启麦克风。</string>
     <string name="ui_microphone_permission_denied_enable_it_in_settings">"未获得麦克风权限，可在系统设置中开启"</string>
     <string name="ui_background_service_is_starting_try_again">"后台服务正在初始化，请重试"</string>
     <string name="ui_connect_to_a_pc_first">"请先连接电脑"</string>
@@ -142,6 +154,8 @@
     <string name="app_name">"羽连 PlumeLink"</string>
     <string name="mic_privacy_muted">系统麦克风已静音，请检查手机的麦克风隐私开关</string>
     <string name="mic_capture_silenced">系统暂停了此应用的收音，请检查通话或其他正在使用麦克风的应用</string>
+    <string name="mic_connecting">正在连接麦克风…</string>
+    <string name="mic_reconnecting">正在重连麦克风…</string>
     <string name="ui_transfer_timeout">传输超过两小时，已停止。请在网络稳定后重试。</string>
     <string name="ui_transfer_upload_rejected">电脑拒绝了上传（%1$d）。请检查文件传输权限后重试。</string>
     <string name="ui_transfer_upload_unavailable">电脑暂时无法接收文件（%1$d）。请检查电脑连接后重试。</string>
@@ -167,4 +181,44 @@
     <string name="ui_permission_settings">去设置</string>
     <string name="ui_pair_again">重新配对</string>
     <string name="ui_pair_again_explanation">将清除此手机上的配对凭据，并保留这台电脑。再次连接时，需要输入电脑上显示的配对码。</string>
+    <plurals name="ui_batch_partially_sent">
+        <item quantity="other">已发送 %1$d/%2$d 个文件。%3$s</item>
+    </plurals>
+    <string name="ui_previous_transfer_interrupted">上次传输未正常结束，请检查接收文件后重新选择重试。</string>
+    <string name="ui_unfinished_download_changed">文件已变化，请刷新并核对后重试。</string>
+    <string name="ui_unfinished_download_remove_failed">无法移除文件，请检查目录访问权限后重试。</string>
+    <string name="ui_share_pending">待发送 · %1$d</string>
+    <string name="ui_share_clear">清空</string>
+    <string name="ui_share_retry">重新读取</string>
+    <string name="ui_share_reading">正在读取文件…</string>
+    <string name="ui_share_connect_first">请选择电脑并获得文件权限，然后确认发送。</string>
+    <string name="ui_share_invalid">未收到有效文件。请从相册或文件管理器分享文件，每次最多 16 个。</string>
+    <string name="ui_share_unreadable">无法读取此文件，请重新读取，或从来源应用重新分享。</string>
+    <string name="ui_share_file_changed">文件已变化，请重新选择后发送。</string>
+    <string name="ui_share_not_started">未能开始传输，请等待当前传输结束后重试。</string>
+    <string name="ui_usb_connection_expired">USB 连接已失效，请在电脑「偏好设置 → USB 有线连接」中重新连接手机</string>
+    <string name="ui_usb_connection_expired_status">USB 连接已失效</string>
+    <string name="ui_microphone_background_denied">系统无法保持麦克风运行，请返回应用后重新开启收音。</string>
+    <string name="ui_transfer_pairing_expired">配对已失效，请重新连接电脑并配对后再传输文件。</string>
+    <string name="ui_transfer_permission_denied">文件权限已关闭，请在电脑端的设备权限中开启文件传输，然后重试。</string>
+    <string name="ui_upload_result_unconfirmed">已停止发送，电脑保存结果尚未确认。请先检查电脑接收目录，再决定是否重新发送此文件。</string>
+    <plurals name="ui_upload_partial_unconfirmed">
+        <item quantity="other">电脑已确认保存 %1$d/%2$d 个文件。%3$s</item>
+    </plurals>
+    <plurals name="ui_upload_cancelled_partial">
+        <item quantity="other">已停止发送，电脑已保存 %1$d/%2$d 个文件。</item>
+    </plurals>
+    <plurals name="ui_upload_cancel_completed">
+        <item quantity="other">取消完成前，电脑已保存 %1$d 个文件。</item>
+    </plurals>
+    <string name="ui_file_provider_busy">此文件位置仍在处理上一次操作。可先选择其它位置的文件，或稍后重试。</string>
+    <string name="ui_file_provider_slow">文件位置暂时没有响应，正在停止本次传输…</string>
+    <string name="ui_download_result_unconfirmed">已停止等待文件操作，保存结果尚未确认。请先检查所选的 Android 目录，再决定是否重试。</string>
+    <string name="ui_file_provider_stopped">已取消传输。此文件位置仍在响应，可先选择其它位置，或稍后重试。</string>
+    <string name="ui_connection_recovery_searching">正在查找这台电脑…</string>
+    <string name="ui_connection_recovery_not_found">未找到可恢复的电脑连接，请确认电脑服务已开启并处于同一网络。</string>
+    <string name="ui_connection_recovery_busy">请先停止收音并等待文件传输结束，再恢复连接。</string>
+    <string name="ui_connection_recovery_unavailable">当前连接无法自动恢复，请返回电脑列表重新连接。</string>
+    <string name="ui_connection_recovery_cancelled">已停止查找，原连接信息已保留。</string>
+    <string name="ui_could_not_open_background_settings">请在系统设置中允许羽连后台运行。</string>
 </resources>

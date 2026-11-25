@@ -19,6 +19,7 @@ const props = defineProps<{
     renderedSignalSamples?: number;
     inputLevel?: number;
     outputLevel?: number;
+    clipping?: boolean;
   };
 }>();
 
@@ -32,7 +33,11 @@ const serviceInstalled = ref(false);
 const inputs = ref<Output[]>([]);
 const installing = ref(false);
 const gainDb = ref(6);
+const savedGainDb = ref(6);
 const gainBusy = ref(false);
+const stopBusy = ref(false);
+const gainClipping = computed(() => props.status?.active === true && props.status.clipping === true);
+let gainRevision = 0;
 
 const signalState = computed(() => {
   const state = props.status;
@@ -49,24 +54,45 @@ const cablePresent = computed(() =>
   inputs.value.some(i => /^CABLE (?:Output|Out)(?:\s*\(|$)/i.test(i.name)),
 );
 
-function readDevices(value: ActionValue) {
+function readDevices(value: ActionValue, readGainRevision: number) {
   outputs.value = value.outputs;
   inputs.value = value.recordingInputs ?? [];
   serviceInstalled.value = !!value.cableInstalled;
   selected.value = value.selected;
-  if (value.gainDb !== undefined) gainDb.value = value.gainDb;
+  if (value.gainDb !== undefined && readGainRevision === gainRevision && !gainBusy.value) {
+    savedGainDb.value = gainDb.value = value.gainDb;
+  }
   verifiedInput.value = outputs.value.some(o => o.id === value.selected) ? value.verifiedInput?.name || "" : "";
   loaded.value = true;
 }
 async function saveGain() {
   if (gainBusy.value) return;
   gainBusy.value = true;
+  gainRevision++;
+  const requested = gainDb.value;
+  message.value = "";
   try {
-    await invoke("microphone_action", { action: "gain", id: String(gainDb.value) });
+    const result = await invoke<{ gainDb?: number }>("microphone_action", { action: "gain", id: String(requested) });
+    savedGainDb.value = gainDb.value = result.gainDb ?? requested;
+  } catch (error) {
+    gainDb.value = savedGainDb.value;
+    message.value = errorText(error, t("操作失败"));
+  } finally {
+    gainRevision++;
+    gainBusy.value = false;
+  }
+}
+
+async function stopReceiving() {
+  if (stopBusy.value) return;
+  stopBusy.value = true;
+  message.value = "";
+  try {
+    await invoke("microphone_action", { action: "stop" });
   } catch (error) {
     message.value = errorText(error, t("操作失败"));
   } finally {
-    gainBusy.value = false;
+    stopBusy.value = false;
   }
 }
 
@@ -84,10 +110,11 @@ async function configure(id: string) {
 async function setup(automatic = false) {
   if (busy.value || props.status?.active) return;
   const manual = selected.value;
+  const readGainRevision = gainRevision;
   busy.value = true;
   message.value = "";
   try {
-    readDevices(await invoke<ActionValue>("microphone_action", { action: "list" }));
+    readDevices(await invoke<ActionValue>("microphone_action", { action: "list" }), readGainRevision);
     const virtual = outputs.value.filter(o => o.virtualHint);
     const saved = virtual.find(o => o.id === selected.value);
     const candidate = cableOutputs.value.length === 1 ? cableOutputs.value[0]
@@ -107,6 +134,7 @@ async function setup(automatic = false) {
 
 async function action(actionName: string) {
   if (busy.value) return;
+  const readGainRevision = gainRevision;
   busy.value = true;
   message.value = "";
   installing.value = actionName === "installCable";
@@ -115,7 +143,7 @@ async function action(actionName: string) {
       action: actionName,
       id: selected.value,
     });
-    readDevices(value);
+    readDevices(value, readGainRevision);
     if (actionName === "installCable") {
       if (cableOutputs.value.length === 1) await configure(cableOutputs.value[0].id);
       else message.value = t("安装程序已关闭。请按官方提示重启 Windows，然后重新检测。");
@@ -151,7 +179,7 @@ async function action(actionName: string) {
           : t('未检测到 VB-CABLE。已有其他虚拟声卡也可以直接检测。') }}</p>
         <p v-if="loaded && cablePresent && !verifiedInput" class="hint">{{ cableOutputs.length
           ? t('尚未验证录音通路，点击「检测并配置麦克风」即可测试。')
-          : t('驱动已存在，但标准播放端不可用。请检查 Windows 声音设置，或在安装后重启再检测。') }}</p>
+          : t('驱动已存在，但标准播放端不可用。请检查 Windows 声音设置，或在安装后重启再检测。') }}<button v-if="!cableOutputs.length" type="button" class="mic-reinstall-link" :disabled="busy || status?.active" @click="action('installCable')">{{ t('点击重新安装') }}</button></p>
         <div class="diagnostic-actions mic-setup-actions">
           <button class="accent" :disabled="busy || !loaded || status?.active" @click="setup(true)">{{ t('检测并配置麦克风') }}</button>
           <button v-if="loaded && !cablePresent" :disabled="busy || status?.active" @click="action('installCable')">{{ t('安装 VB-CABLE') }}</button>
@@ -179,10 +207,10 @@ async function action(actionName: string) {
       <div class="mic-section mic-controls">
         <label class="mic-gain-heading" for="microphone-gain">{{ t('麦克风增益') }}<output for="microphone-gain">+{{ gainDb }} dB</output></label>
         <input id="microphone-gain" v-model.number="gainDb" type="range" min="0" max="36" step="3" :disabled="!loaded || gainBusy" :aria-label="t('麦克风增益')" :aria-valuetext="`+${gainDb} dB`" aria-describedby="gain-help" @change="saveGain" />
-        <p id="gain-help" class="hint">{{ t('声音失真时请调低增益。') }}</p>
+        <p id="gain-help" class="hint" :class="{ 'gain-clipping': gainClipping }" role="status">{{ gainClipping ? t('增益过高，请调低。') : t('声音失真时请调低增益。') }}</p>
       </div>
       <div v-if="status?.active" class="audio-signal">
-        <div class="mic-signal-heading"><p role="status">{{ signalState }}</p><button :disabled="busy" @click="action('stop')">{{ t('停止接收') }}</button></div>
+        <div class="mic-signal-heading"><p role="status">{{ signalState }}</p><button :disabled="stopBusy" @click="stopReceiving">{{ t('停止接收') }}</button></div>
         <div class="audio-levels">
           <label>{{ t('手机信号') }}<meter min="0" max="1" :value="status.inputLevel ?? 0" :aria-label="t('手机音频信号')" /></label>
           <label>{{ t('播放信号') }}<meter min="0" max="1" :value="status.outputLevel ?? 0" :aria-label="t('Windows 播放信号')" /></label>
@@ -191,3 +219,24 @@ async function action(actionName: string) {
     </div>
   </details>
 </template>
+
+<style scoped>
+.mic-reinstall-link {
+  display: inline;
+  min-height: 0;
+  margin-inline-start: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
+  font: inherit;
+  line-height: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.mic-reinstall-link:hover:not(:disabled) { background: transparent; color: var(--accent-hover); }
+.mic-reinstall-link:active:not(:disabled) { background: transparent; color: var(--accent-active); }
+</style>

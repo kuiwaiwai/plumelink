@@ -5,6 +5,7 @@ import type { Command } from "../../shared/protocol";
 import type { Motion } from "./qft-transport";
 import { storage } from "./storage";
 import { loadQftKernel, QftTransport, supportsQft } from "./qft-transport";
+import { thumbnail } from "../../shared/thumbnail";
 
 export type ConnectionQuality = "unknown" | "good" | "fair" | "poor";
 
@@ -38,9 +39,11 @@ export function classifyConnectionQuality(
 }
 
 export function useConnection() {
+  const usb = typeof location !== "undefined" && location.hostname === "127.0.0.1";
   const status = ref<"unpaired" | "connecting" | "connected" | "offline">(
     "unpaired",
   );
+  const networkOffline = ref(!usb && typeof navigator !== "undefined" && navigator.onLine === false);
   const message = ref(t('输入电脑上的配对码，开始遥控'));
   const latency = ref<number | null>(null);
   const jitter = ref<number | null>(null);
@@ -51,6 +54,7 @@ export function useConnection() {
     fair: t('网络一般'),
     poor: t('网络较差'),
   })[quality.value]);
+  const features = ref<string[]>([]);
   const permissions = ref({ input: true, text: true, files: true, power: false, microphone: false });
   const deviceName = ref("");
   const controlMode = ref<"free" | "primary">("free");
@@ -74,10 +78,13 @@ export function useConnection() {
   }
   const adminGranted = ref(false);
   const recentController = ref("");
+  const usbExpired = ref(false);
   const phase = ref<"initial" | "retrying" | "failed" | "paused" | "replaced">("initial");
   const connectionLabel = computed(() => {
+    if (usbExpired.value) return t("USB 连接已失效");
     if (status.value === "connected") return latency.value === null ? t('已连接') : t('已连接 · {0} ms', latency.value);
     if (status.value === "unpaired") return t('点击配对');
+    if (networkOffline.value && status.value === "offline") return t("网络已断开，等待网络恢复…");
     if (phase.value === "replaced") return t('连接已被接管，点击重连');
     if (phase.value === "paused") return t('连接已暂停，点击重连');
     if (phase.value === "failed") return t('连接失败，点击重试');
@@ -85,8 +92,10 @@ export function useConnection() {
     return t('正在连接…');
   });
   const connectionBadgeLabel = computed(() => {
+    if (usbExpired.value) return t("USB 连接已失效");
     if (status.value === "connected") return t("已连接");
     if (status.value === "unpaired") return t("连接电脑");
+    if (networkOffline.value && status.value === "offline") return t("无网络");
     if (phase.value === "retrying") return t("正在重连…");
     if (phase.value === "failed") return t("连接失败");
     if (phase.value === "paused" || phase.value === "replaced") return t("未连接");
@@ -95,6 +104,13 @@ export function useConnection() {
   let token = "";
   let deviceId = "";
   const nativeCredentials = androidBridge();
+  let usbAccess = "";
+  try { const key = nativeCredentials?.getUsbAccessKey?.(); if (usb && typeof key === "string" && /^[a-f0-9]{64}$/.test(key)) usbAccess = key; } catch {}
+  const usbHeaders = (): Record<string,string> => usbAccess ? { "X-PlumeLink-USB": usbAccess } : {};
+  function expireUsb() {
+    usbExpired.value = true; suspend(); phase.value = "failed";
+    message.value = t('USB 连接已失效，请在电脑「偏好设置 → USB 有线连接」中重新连接手机');
+  }
   try {
     token = nativeCredentials?.getStoredToken ? nativeCredentials.getStoredToken() : storage.getItem("plumelink-token") || "";
     deviceId = nativeCredentials?.getStoredDeviceId ? nativeCredentials.getStoredDeviceId() : storage.getItem("plumelink-device-id") || "";
@@ -112,6 +128,21 @@ export function useConnection() {
     } catch {}
   }
   let socket: WebSocket | undefined;
+  async function syncDeviceName(ws: WebSocket) {
+    try {
+      const name = nativeCredentials?.getDeviceName?.();
+      if (typeof name !== "string" || !name.trim()) return;
+      const model = nativeCredentials?.getDeviceModel?.() || "";
+      const result = await api("/api/device/name", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, model }),
+      });
+      if (!result.ok || socket !== ws || ws.readyState !== WebSocket.OPEN) return;
+      const body = await result.json();
+      if (socket === ws && typeof body.deviceName === "string" && body.deviceName.length <= 80
+          && !/[\u0000-\u001f\u007f]/.test(body.deviceName)) deviceName.value = body.deviceName;
+    } catch {}
+  }
   let retry: ReturnType<typeof setTimeout> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let attempt = 0;
@@ -130,14 +161,20 @@ export function useConnection() {
   let qftSwitchTimer: ReturnType<typeof setTimeout> | undefined;
   let networkListenersAttached = false;
   const onNetworkOnline = () => {
+    networkOffline.value = false;
     if (!token || suspended || !mayRun()) return;
     attempt = 0;
     if (!socket || socket.readyState >= WebSocket.CLOSING) connect();
   };
   const onNetworkOffline = () => {
-    if (status.value !== "connected" && !suspended) {
-      message.value = t('网络已断开，等待网络恢复…');
-    }
+    if (suspended || usb) return;
+    networkOffline.value = true;
+    clearTimeout(retry);
+    if (socket && socket.readyState < WebSocket.CLOSING) return;
+    resetSession();
+    status.value = token ? "offline" : "unpaired";
+    message.value = t('网络已断开，等待网络恢复…');
+    scheduleReconnect();
   };
   function setNetworkListeners(attach: boolean) {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
@@ -223,17 +260,46 @@ export function useConnection() {
     if (typeof presence.recentController === "string" && presence.recentController.length <= 80 && !/[\u0000-\u001f\u007f]/.test(presence.recentController)) recentController.value = presence.recentController;
     else if (presence.recentController === null) recentController.value = "";
   }
+  function scheduleReconnect() {
+    clearTimeout(retry);
+    if (!token || suspended || !mayRun()) return;
+    const base = networkOffline.value ? 5000 : Math.min(5000, 500 * 2 ** Math.min(attempt++, 6));
+    retry = setTimeout(connect, base + Math.floor(Math.random() * 200));
+  }
+  function resetSession() {
+    clearControlRequest();
+    clearInterval(heartbeat);
+    resetQuality();
+    resetTransport();
+    features.value = [];
+    permissions.value = { input: false, text: false, files: false, power: false, microphone: false };
+    controlMode.value = "free";
+    primary.value = false;
+    connectedCount.value = 0;
+    primaryName.value = "";
+    adminGranted.value = false;
+    recentController.value = "";
+  }
   function connect() {
     clearTimeout(retry);
     if (!token || !mayRun() || suspended) return;
+    if (nativeCredentials?.isControlForegroundReady?.() === false) return;
     if (socket && socket.readyState < WebSocket.CLOSING) return;
     if (phase.value === "failed") phase.value = "retrying";
     clearInterval(heartbeat);
     status.value = "connecting";
     message.value = t('正在连接电脑…');
-    const ws = new WebSocket(
-      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
-    );
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${usbAccess ? `?usb=${usbAccess}` : ""}`);
+    } catch {
+      resetSession();
+      status.value = "offline";
+      phase.value = "failed";
+      message.value = t('连接失败，请检查电脑服务、Wi-Fi 和防火墙');
+      scheduleReconnect();
+      return;
+    }
     socket = ws;
     let receivedReady = false;
     ws.binaryType = "arraybuffer";
@@ -262,11 +328,16 @@ export function useConnection() {
         ws.close();
         return;
       }
+      if (data.kind === "qftFailure") {
+        qft?.receiveFailure(data);
+        return;
+      }
       if (data.kind === "ready") {
         if (receivedReady) { ws.close(); return; }
         receivedReady = true;
         clearTimeout(openTimeout);
         status.value = "connected";
+        networkOffline.value = false;
         phase.value = "initial";
         message.value = t('已连接，可以遥控');
         attempt = 0;
@@ -279,7 +350,7 @@ export function useConnection() {
         primaryName.value = "";
         adminGranted.value = false;
         recentController.value = "";
-        if (data.permissions !== undefined) {
+        {
           const nextPermissions = data.permissions && typeof data.permissions === "object"
             ? data.permissions as Record<string, unknown>
             : {};
@@ -291,6 +362,7 @@ export function useConnection() {
             microphone: nextPermissions.microphone === true,
           };
         }
+        features.value = Array.isArray(data.features) ? ["media", "custom-keys"].filter(feature => data.features.includes(feature)) : [];
         deviceName.value = typeof data.deviceName === "string" && data.deviceName.length <= 80 && !/[\u0000-\u001f\u007f]/.test(data.deviceName) ? data.deviceName : "";
         controlMode.value = data.controlMode === "primary" ? "primary" : "free";
         primary.value = controlMode.value === "primary" && data.primary === true;
@@ -299,6 +371,7 @@ export function useConnection() {
           suspended = true; message.value = t('电脑端版本不匹配，请同时更新手机和电脑端'); ws.close(); return;
         }
         const capability = data.qft;
+        void syncDeviceName(ws);
         if (permissions.value.input || permissions.value.text || permissions.value.power) {
           status.value = "connecting";
           let loading = true;
@@ -346,18 +419,9 @@ export function useConnection() {
       clearTimeout(openTimeout);
       clearInterval(connectionHeartbeat);
       if (socket !== ws) return;
-      clearControlRequest();
-      clearInterval(heartbeat);
-      resetQuality();
-      resetTransport();
-      permissions.value = { input: false, text: false, files: false, power: false, microphone: false };
-      controlMode.value = "free";
-      primary.value = false;
-      connectedCount.value = 0;
-      primaryName.value = "";
-      adminGranted.value = false;
-      recentController.value = "";
+      resetSession();
       socket = undefined;
+      if (event.code === 4409 && usb) { expireUsb(); return; }
       if (event.code === 4003) {
         saveToken("");
         status.value = "unpaired";
@@ -375,12 +439,8 @@ export function useConnection() {
       if (status.value === "connecting" && phase.value === "initial" && !suspended) phase.value = "failed";
       status.value = token ? "offline" : "unpaired";
       if (!suspended && mayRun() && phase.value !== "failed") phase.value = "retrying";
-      if (!suspended) message.value = customReason || (phase.value === "failed" ? t('连接失败，请检查电脑服务、Wi-Fi 和防火墙') : phase.value === "retrying" ? t('连接已断开，正在自动重连电脑…') : t('连接已断开，旧操作已清空'));
-      if (token && !suspended && mayRun()) {
-        const base = Math.min(5000, 500 * 2 ** Math.min(attempt++, 6));
-        const jitterDelay = base + Math.floor(Math.random() * 200);
-        retry = setTimeout(connect, jitterDelay);
-      }
+      if (!suspended) message.value = customReason || (networkOffline.value ? t('网络已断开，等待网络恢复…') : phase.value === "failed" ? usb ? t('USB 连接失败，请检查数据线、手机授权和电脑服务') : t('连接失败，请检查电脑服务、Wi-Fi 和防火墙') : phase.value === "retrying" ? t('连接已断开，正在自动重连电脑…') : t('连接已断开，旧操作已清空'));
+      scheduleReconnect();
     };
     ws.onerror = () => {
       if (socket !== ws) return;
@@ -392,6 +452,7 @@ export function useConnection() {
   }
   let pairPending = false;
   async function pair(code: string, name = t('移动设备')) {
+    if (usbExpired.value) { message.value=t('USB 连接已失效，请在电脑「偏好设置 → USB 有线连接」中重新连接手机'); return; }
     if (pairPending || !/^[0-9]{6}$/.test(code)) return;
     pairPending = true;
     const generation = credentialGeneration;
@@ -407,10 +468,11 @@ export function useConnection() {
     try {
       const res = await fetch("/api/pair", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...usbHeaders() },
         body: JSON.stringify({ code, deviceId, deviceName: name }),
         signal: controller.signal,
       });
+      if (generation === credentialGeneration && usb && res.status === 410) { expireUsb(); return; }
       const result = await res.json();
       if (generation !== credentialGeneration || controller.signal.aborted) return;
       if (!res.ok) throw new Error(result.error || t('配对失败'));
@@ -442,26 +504,41 @@ export function useConnection() {
   }
   function send(command: Command): Promise<void> {
     if (!usable() || !qft) return Promise.reject(new Error(t('尚未连接，操作未发送')));
+    if (command.type === "media" && !features.value.includes("media"))
+      return Promise.reject(new Error(t("请更新电脑端以使用系统媒体控制")));
     return qft.send(command);
   }
   function suspend() {
-    clearControlRequest();
     credentialGeneration++;
     pairingController?.abort();
     suspended = true;
-    phase.value = "paused";
+    phase.value = usbExpired.value ? "failed" : "paused";
     setNetworkListeners(false);
     clearTimeout(retry);
-    clearInterval(heartbeat);
-    resetQuality();
     qft?.cancel();
-    resetTransport();
+    resetSession();
     const previous = socket;
     socket = undefined;
     previous?.close();
     status.value = token ? "offline" : "unpaired";
   }
+  function releaseInput() {
+    suspend();
+  }
   function resume() {
+    if (usbExpired.value) return;
+    if (nativeCredentials?.isControlForegroundReady?.() === false) return;
+    try {
+      const state = JSON.parse(nativeCredentials?.getConnectionKeepAliveState?.() || "{}");
+      if (state.terminalCode === 4409 && usb) { expireUsb(); return; }
+      if (state.terminalCode === 4003) {
+        forget();
+        message.value = t('连接已过期，请输入电脑上的配对码');
+        return;
+      }
+    } catch {}
+    if (typeof navigator !== "undefined" && typeof navigator.onLine === "boolean")
+      networkOffline.value = !usb && !navigator.onLine;
     suspended = false;
     setNetworkListeners(true);
     if (phase.value === "paused" || phase.value === "replaced" || phase.value === "failed") {
@@ -477,10 +554,12 @@ export function useConnection() {
     message.value = t('已忘记本机凭证，可重新配对');
   }
   async function request<T>(path: string, init: RequestInit, read: (response: Response) => Promise<T>) {
+    if (usbExpired.value) throw new Error(t('USB 连接已失效，请在电脑「偏好设置 → USB 有线连接」中重新连接手机'));
     if (!token) throw new Error(t('需要先与电脑配对'));
     const headers = new Headers(init.headers);
     const generation = credentialGeneration;
     headers.set("Authorization", `Bearer ${token}`);
+    if (usbAccess) headers.set("X-PlumeLink-USB",usbAccess);
     const controller = new AbortController();
     const abortParent = () => controller.abort();
     const timeout = setTimeout(() => controller.abort(), 12_000);
@@ -491,6 +570,7 @@ export function useConnection() {
     try {
       const response = await fetch(path, { ...init, headers, signal: controller.signal });
       if (generation !== credentialGeneration) throw new Error(t('连接已变化，请重试'));
+      if (response.status === 410 && usb) { expireUsb(); throw new Error(t('USB 连接已失效，请在电脑「偏好设置 → USB 有线连接」中重新连接手机')); }
       if (response.status === 401) {
         forget();
         throw new Error(t('配对已失效，请重新配对'));
@@ -508,7 +588,11 @@ export function useConnection() {
     }
   }
   function api(path: string, init: RequestInit = {}) {
-    return request(path, init, async response => response);
+    return request(path, init, async response => {
+      // Keep cancellation and the timeout active until the response body arrives.
+      await response.clone().arrayBuffer();
+      return response;
+    });
   }
   async function requestControl() {
     if (controlRequestPending.value || status.value !== "connected" || controlMode.value !== "primary" || primary.value || !permissions.value.input) return;
@@ -533,10 +617,19 @@ export function useConnection() {
       if (!response.ok || !Array.isArray(data.windows)) throw new Error(data.error || t("无法获取窗口列表"));
       return data.windows as unknown[];
     });
-    return result.filter((entry): entry is RemoteWindow => {
-      if (!entry || typeof entry !== "object") return false;
+    const seen = new Set<number>();
+    return result.flatMap((entry): RemoteWindow[] => {
+      if (!entry || typeof entry !== "object") return [];
       const window = entry as Record<string, unknown>;
-      return typeof window.hwnd === "number" && typeof window.title === "string";
+      if (typeof window.hwnd !== "number" || !Number.isSafeInteger(window.hwnd) || window.hwnd <= 0 ||
+        seen.has(window.hwnd) || typeof window.title !== "string" || !window.title.trim() || window.title.length > 2048) return [];
+      seen.add(window.hwnd);
+      return [{
+        hwnd: window.hwnd, title: window.title,
+        app: typeof window.app === "string" && window.app.length <= 512 ? window.app : "",
+        minimized: window.minimized === true,
+        icon: thumbnail(window.icon, 128) ?? null,
+      }];
     });
   }
   async function switchWindow(hwnd: number) {
@@ -550,5 +643,5 @@ export function useConnection() {
       throw new Error(result.error || t("切换窗口失败"));
     });
   }
-  return { status, message, connectionLabel, connectionBadgeLabel, latency, jitter, quality, qualityLabel, permissions, fileAccessPending, deviceName, controlMode, primary, connectedCount, primaryName, controlRequestPending, adminGranted, recentController, qft2, transportStats, setResponseMode, setBackgroundAllowed, sendMotion, clearMotion, requestControl, listWindows, switchWindow, pair, send, suspend, resume, forget, api, token: () => token };
+  return { status, message, usbExpired: computed(() => usbExpired.value), connectionLabel, connectionBadgeLabel, latency, jitter, quality, qualityLabel, features, permissions, fileAccessPending, deviceName, controlMode, primary, connectedCount, primaryName, controlRequestPending, adminGranted, recentController, qft2, transportStats, setResponseMode, setBackgroundAllowed, sendMotion, clearMotion, requestControl, listWindows, switchWindow, pair, send, releaseInput, suspend, resume, forget, api, token: () => token };
 }

@@ -1,10 +1,13 @@
 import { computed, onMounted, onUnmounted, ref, watch, type ComputedRef, type Ref } from "vue";
 import { storage } from "../storage";
-import type { Destination } from "../components/AppNavigation.vue";
+import type { Destination } from "../native/navigation";
 import type { AndroidBridge } from "../native/bridge";
+import { isShortcutValue } from "../shortcuts";
 import { defaultShortcutIcon, shortcutIconNames } from "../shortcut-icons";
+import { controlPreferenceKeys, controlPreferenceStorage, controlStorageValue, validControlPreference } from "../control-preferences";
+import { parseShortcutPlans, validShortcutSlots, type ShortcutPlan, type ShortcutSlot } from "../shortcut-plans";
 
-const SHORTCUT_VALUES = ["mute", "magnifier", "taskview", "notifications", "previousapp", "nextapp", "virtualleft", "virtualright"] as const;
+
 
 export function useMobileSettings(
   android: AndroidBridge | undefined,
@@ -22,14 +25,15 @@ export function useMobileSettings(
     android?.setKeepAlivePreference?.(keepAlive.value);
   }
   const haptics = ref(storage.getItem("plumelink-haptics") !== "false");
+  const hardwareVolume = ref(storage.getItem("plumelink-hardware-volume") === "true");
   const savedTheme = android?.getThemePreference?.() || storage.getItem("plumelink-theme");
   const theme = ref(savedTheme === "light" || savedTheme === "dark" ? savedTheme : "system");
   const savedShortcutA = storage.getItem("plumelink-shortcut-a");
   const savedShortcutB = storage.getItem("plumelink-shortcut-b");
   const savedShortcutC = storage.getItem("plumelink-shortcut-c");
-  const shortcutA = ref(SHORTCUT_VALUES.includes(savedShortcutA as typeof SHORTCUT_VALUES[number]) ? savedShortcutA! : "taskview");
-  const shortcutB = ref(SHORTCUT_VALUES.includes(savedShortcutB as typeof SHORTCUT_VALUES[number]) ? savedShortcutB! : "notifications");
-  const shortcutC = ref(SHORTCUT_VALUES.includes(savedShortcutC as typeof SHORTCUT_VALUES[number]) ? savedShortcutC! : "nextapp");
+  const shortcutA = ref(isShortcutValue(savedShortcutA) ? savedShortcutA : "taskview");
+  const shortcutB = ref(isShortcutValue(savedShortcutB) ? savedShortcutB : "notifications");
+  const shortcutC = ref(isShortcutValue(savedShortcutC) ? savedShortcutC : "nextapp");
   const iconFor = (slot: string, action: string) => {
     const saved = storage.getItem(`plumelink-shortcut-icon-${slot}`);
     return saved && shortcutIconNames.includes(saved) ? saved : defaultShortcutIcon(action);
@@ -37,6 +41,9 @@ export function useMobileSettings(
   const shortcutIconA = ref(iconFor("a", shortcutA.value));
   const shortcutIconB = ref(iconFor("b", shortcutB.value));
   const shortcutIconC = ref(iconFor("c", shortcutC.value));
+  const shortcutActions = [shortcutA, shortcutB, shortcutC];
+  const shortcutIcons = [shortcutIconA, shortcutIconB, shortcutIconC];
+  const shortcutPlans = ref<ShortcutPlan[]>([]);
   const longPressDrag = ref(storage.getItem("plumelink-long-press-drag") !== "false");
   const scrollDirection = ref(storage.getItem("plumelink-scroll-direction") === "follow" ? "follow" : "opposite");
   const savedResponseMode = storage.getItem("plumelink-response-mode");
@@ -46,6 +53,32 @@ export function useMobileSettings(
   const controlMode = ref(storage.getItem("plumelink-control-mode") === "dpad" ? "dpad" : "trackpad");
   const savedDialSize = storage.getItem("plumelink-dial-size");
   const dialSize = ref(savedDialSize === "small" || savedDialSize === "large" ? savedDialSize : "standard");
+  const microphoneMode = ref(storage.getItem("plumelink-microphone-mode") === "voice" ? "voice" : "standard");
+  const controlModels = { sensitivity, keepAwake, haptics, hardwareVolume, longPressDrag, scrollDirection, responseMode, padOnRight, focusMode, controlMode, dialSize, microphoneMode };
+  try {
+    const saved = android?.getMobilePreferences?.();
+    if (saved && saved.length <= 16384) {
+      const input: unknown = JSON.parse(saved);
+      if (input && typeof input === "object" && !Array.isArray(input)) {
+        const preferences = input as Record<string, unknown>;
+        shortcutPlans.value = parseShortcutPlans(preferences.shortcutPlans) || [];
+        for (const key of controlPreferenceKeys) if (validControlPreference(key, preferences[key])) {
+          (controlModels[key] as Ref<unknown>).value = preferences[key];
+          storage.setItem("plumelink-" + controlPreferenceStorage[key], controlStorageValue(key, preferences[key]));
+        }
+        const values = preferences.shortcuts;
+        if (Array.isArray(values) && values.length === 3 && values.every(item => item && typeof item === "object"
+          && isShortcutValue(item.action) && typeof item.icon === "string" && shortcutIconNames.includes(item.icon))) {
+          values.forEach((item, index) => {
+            shortcutActions[index].value = item.action; shortcutIcons[index].value = item.icon;
+            const slot = ["a", "b", "c"][index];
+            storage.setItem("plumelink-shortcut-" + slot, item.action);
+            storage.setItem("plumelink-shortcut-icon-" + slot, item.icon);
+          });
+        }
+      }
+    }
+  } catch {}
   const immersive = computed(() => focusMode.value && destination.value === "remote");
 
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
@@ -59,31 +92,12 @@ export function useMobileSettings(
     android?.setAppearance?.(dark);
   }
 
-  let wakeLock: { release(): Promise<void> } | null = null;
-  let wakeGeneration = 0;
-
   async function syncWakeLock() {
-    const ticket = ++wakeGeneration;
-    if (android?.setKeepAwake) {
-      android.setKeepAwake(online.value && keepAwake.value && !document.hidden);
-      return;
-    }
-    if (wakeLock && (!online.value || !keepAwake.value || document.hidden)) {
-      await wakeLock.release().catch(() => {});
-      wakeLock = null;
-    }
-    if (!wakeLock && online.value && keepAwake.value && !document.hidden && "wakeLock" in navigator) {
-      try {
-        const acquired = await (navigator as Navigator & { wakeLock: { request(type: "screen"): Promise<{ release(): Promise<void> }> } }).wakeLock.request("screen");
-        if (ticket !== wakeGeneration || !online.value || !keepAwake.value || document.hidden) await acquired.release();
-        else wakeLock = acquired;
-      } catch {
-        wakeLock = null;
-      }
-    }
+    android?.setKeepAwake?.(online.value && keepAwake.value && !document.hidden);
   }
 
   watch(padOnRight, right => storage.setItem("plumelink-pad-side", right ? "right" : "left"));
+  watch(hardwareVolume, value => storage.setItem("plumelink-hardware-volume", String(value)));
   watch(controlMode, value => storage.setItem("plumelink-control-mode", value));
   watch(dialSize, value => storage.setItem("plumelink-dial-size", value));
   watch(focusMode, value => storage.setItem("plumelink-focus-mode", String(value)));
@@ -109,13 +123,30 @@ export function useMobileSettings(
     else document.documentElement.dataset.theme = value;
     syncAppearance();
   }, { immediate: true });
-  watch(shortcutA, value => storage.setItem("plumelink-shortcut-a", SHORTCUT_VALUES.includes(value as typeof SHORTCUT_VALUES[number]) ? value : "taskview"));
-  watch(shortcutB, value => storage.setItem("plumelink-shortcut-b", SHORTCUT_VALUES.includes(value as typeof SHORTCUT_VALUES[number]) ? value : "notifications"));
-  watch(shortcutC, value => storage.setItem("plumelink-shortcut-c", SHORTCUT_VALUES.includes(value as typeof SHORTCUT_VALUES[number]) ? value : "nextapp"));
+  [
+    { slot: "a", action: shortcutA, icon: shortcutIconA, fallback: "taskview" },
+    { slot: "b", action: shortcutB, icon: shortcutIconB, fallback: "notifications" },
+    { slot: "c", action: shortcutC, icon: shortcutIconC, fallback: "nextapp" },
+  ].forEach(({ slot, action, icon, fallback }) => {
+    watch(action, (value, previous) => {
+      storage.setItem("plumelink-shortcut-" + slot, isShortcutValue(value) ? value : fallback);
+      if (icon.value === defaultShortcutIcon(previous)) icon.value = defaultShortcutIcon(value);
+    }, { flush: "sync" });
+  });
   watch(shortcutIconA, value => storage.setItem("plumelink-shortcut-icon-a", shortcutIconNames.includes(value) ? value : "star"));
   watch(shortcutIconB, value => storage.setItem("plumelink-shortcut-icon-b", shortcutIconNames.includes(value) ? value : "star"));
   watch(shortcutIconC, value => storage.setItem("plumelink-shortcut-icon-c", shortcutIconNames.includes(value) ? value : "star"));
+  watch([...Object.values(controlModels), ...shortcutActions, ...shortcutIcons, shortcutPlans], () => {
+    try { android?.setMobilePreferences?.(JSON.stringify({
+      version: 3,
+      ...Object.fromEntries(controlPreferenceKeys.map(key => [key, controlModels[key].value])),
+      shortcuts: shortcutActions.map((action, index) => ({ action: action.value, icon: shortcutIcons[index].value })),
+      shortcutPlans: shortcutPlans.value,
+    })); }
+    catch {}
+  }, { immediate: true, flush: "post" });
   watch(longPressDrag, value => storage.setItem("plumelink-long-press-drag", String(value)));
+  watch(microphoneMode, value => storage.setItem("plumelink-microphone-mode", value));
   watch(scrollDirection, value => storage.setItem("plumelink-scroll-direction", value));
   watch(responseMode, value => {
     storage.setItem("plumelink-response-mode", value);
@@ -130,17 +161,22 @@ export function useMobileSettings(
 
   onUnmounted(() => {
     android?.setKeepAwake?.(false);
-    wakeGeneration++;
     window.removeEventListener("plumelink-appearance", syncAppearance);
     systemDark.removeEventListener("change", syncAppearance);
-    void wakeLock?.release().catch(() => {});
   });
 
   return {
+    shortcutPlans,
+    applyShortcuts(values: ShortcutSlot[]) {
+      if (!validShortcutSlots(values)) return;
+      values.forEach((slot, index) => { shortcutActions[index].value = slot.action; });
+      values.forEach((slot, index) => { shortcutIcons[index].value = slot.icon; });
+    },
     sensitivity,
     keepAwake,
     keepAlive,
     haptics,
+    hardwareVolume,
     theme,
     darkAppearance,
     shortcutA,
@@ -156,6 +192,7 @@ export function useMobileSettings(
     focusMode,
     controlMode,
     dialSize,
+    microphoneMode,
     immersive,
     syncWakeLock,
   };

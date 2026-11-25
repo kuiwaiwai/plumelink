@@ -3,6 +3,37 @@ use crate::{control::Native, protocol::Command};
 use qfast_transmission::{Action, Body, Config, Executor, Frame, Receiver, Vector};
 
 pub const ACTION_COMMAND: u16 = 1;
+#[derive(Clone)]
+pub struct Failure {
+    pub lease: u32,
+    pub action_id: u32,
+    pub stage: i32,
+    pub message: &'static str,
+}
+impl Failure {
+    pub fn matches(&self, frame: Frame) -> bool {
+        frame.lease == self.lease && matches!(frame.body, Body::Ack {
+            action_id, status: qfast_transmission::Status::ExecutionUncertain, ..
+        } if action_id == self.action_id)
+    }
+}
+fn failure_message(message: &str) -> Option<&'static str> {
+    [
+        "此应用需要管理员权限，请在电脑端启动",
+        "应用文件已移动或删除，请在电脑端重新添加",
+        "应用入口已移除，请刷新列表",
+        "快捷入口已移除，请刷新列表",
+        "文件夹已移动或删除，请在电脑端重新添加",
+        "无法打开文件夹，请在电脑端检查访问权限",
+        "无法启动应用，请在电脑端检查该应用是否可用",
+        "请更新手机端以使用快捷启动",
+        "启动请求无效",
+        "启动请求过多，请稍后再试",
+        "Windows 拒绝输入：请检查锁屏、UAC 或管理员窗口",
+        "管理员控制未启用",
+        "管理员控制未启用或已到期",
+    ].into_iter().find(|known| *known == message)
+}
 pub fn config() -> Config {
     Config {
         lease_ms: 15_000,
@@ -25,6 +56,7 @@ pub struct Session {
     config: Config,
     staged: Option<(i32, Command)>,
     staged_high: i32,
+    pub failure: Option<Failure>,
 }
 impl Session {
     pub fn new(
@@ -40,6 +72,7 @@ impl Session {
             config,
             staged: None,
             staged_high: 0,
+            failure: None,
         })
     }
     pub fn stage(&mut self, id: i32, command: Command) -> Result<(), String> {
@@ -75,11 +108,13 @@ impl Session {
         {
             return Err("未知 QFT 动作".into());
         }
+        let mut failure = None;
         let mut executor = Adapter {
             device: self.device.as_deref(),
             native,
             session,
             staged: &mut self.staged,
+            failure: &mut failure,
         };
         // queue_us is measured by our worker. Close the whole lease on a stale
         // effect so a later cumulative prefix cannot resurrect discarded input.
@@ -104,16 +139,22 @@ impl Session {
                 )
                 .map_err(|e| format!("QFT queue expiry: {e:?}"))?;
         }
-        self.receiver
+        let result = self.receiver
             .receive(frame, now, queue, &mut executor)
-            .map_err(|e| format!("QFT: {e:?}"))
+            .map_err(|e| format!("QFT: {e:?}"));
+        if let (Some((stage, message)), Body::Action { id, .. }) = (failure, frame.body) {
+            self.failure = Some(Failure { lease: frame.lease, action_id: id, stage, message });
+        }
+        result
     }
     pub fn poll(&mut self, session: u64, now: u64, native: &mut dyn Native) {
+        let mut failure = None;
         let mut executor = Adapter {
             device: self.device.as_deref(),
             native,
             session,
             staged: &mut self.staged,
+            failure: &mut failure,
         };
         let _ = self.receiver.poll(now, &mut executor);
     }
@@ -123,6 +164,7 @@ struct Adapter<'a> {
     native: &'a mut dyn Native,
     session: u64,
     staged: &'a mut Option<(i32, Command)>,
+    failure: &'a mut Option<(i32, &'static str)>,
 }
 impl Executor for Adapter<'_> {
     type Error = String;
@@ -136,22 +178,29 @@ impl Executor for Adapter<'_> {
         if action.code != ACTION_COMMAND || id != action.argument {
             return Err("动作载荷不匹配".into());
         }
-        if matches!(command, Command::Release {}) {
-            return self.native.qft_release(self.session);
+        let result = (|| {
+            if matches!(command, Command::Release {}) {
+                return self.native.qft_release(self.session);
+            }
+            if matches!(
+                command,
+                Command::Move { .. }
+                    | Command::Motion { .. }
+                    | Command::Click { .. }
+                    | Command::Buttonstate { down: true, .. }
+                    | Command::Scroll { .. }
+                    | Command::Zoom { .. }
+            ) {
+                self.native.qft_validate(self.session)?;
+            }
+            self.native.qft_action_for(self.session, self.device, &command)
+        })();
+        if let Err(message) = &result {
+            if let Some(message) = failure_message(message) {
+                *self.failure = Some((id, message));
+            }
         }
-        if matches!(
-            command,
-            Command::Move { .. }
-                | Command::Motion { .. }
-                | Command::Click { .. }
-                | Command::Buttonstate { down: true, .. }
-                | Command::Scroll { .. }
-                | Command::Zoom { .. }
-        ) {
-            self.native.qft_validate(self.session)?;
-        }
-        self.native
-            .qft_action_for(self.session, self.device, &command)
+        result
     }
     fn release(&mut self) -> Result<(), String> {
         self.staged.take();
@@ -200,6 +249,7 @@ mod tests {
                 native: &mut native,
                 session: 1,
                 staged: &mut staged,
+                failure: &mut None,
             };
             let result = adapter.action(Action {
                 code: ACTION_COMMAND,

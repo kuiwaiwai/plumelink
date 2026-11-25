@@ -4,16 +4,17 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use windows::Win32::{
+use windows::{core::{w, GUID}, Win32::{
+    Foundation::HWND,
     System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     },
     UI::Shell::{
-        FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
+        Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST,
         FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
     },
-};
+}};
 
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_SHARED_FILES: usize = 128;
@@ -115,6 +116,7 @@ struct SharedFile {
 pub struct FileHub {
     next: std::sync::atomic::AtomicU64,
     files: Mutex<Vec<SharedFile>>,
+    pub received: Arc<crate::receive_history::ReceiveHistory>,
 }
 
 impl FileHub {
@@ -122,6 +124,7 @@ impl FileHub {
         Arc::new(Self {
             next: std::sync::atomic::AtomicU64::new(1),
             files: Mutex::new(Vec::new()),
+            received: Arc::new(crate::receive_history::ReceiveHistory::default()),
         })
     }
 
@@ -236,6 +239,20 @@ pub fn receive_dir(store: &SharedStore) -> PathBuf {
     }
 }
 
+pub fn open_receive_directory(path: &Path, create: bool) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{core::{w, PCWSTR}, Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL}};
+    if !path.is_absolute() { return Err("接收目录不存在或已被移动，请重新选择目录".into()); }
+    if create { std::fs::create_dir_all(path).map_err(|_| "无法创建接收目录，请检查目录权限")?; }
+    if !path.is_dir() { return Err("接收目录不存在或已被移动，请重新选择目录".into()); }
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) { return Err("无法打开接收目录，请检查目录是否可用".into()); }
+    wide.push(0);
+    let result = unsafe { ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 { return Err("无法打开接收目录，请检查目录是否可用".into()); }
+    Ok(())
+}
+
 pub fn set_receive_dir(store: &SharedStore, path: PathBuf) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("接收目录必须是绝对路径".into());
@@ -303,27 +320,47 @@ pub fn available_path(directory: &Path, name: &str, attempt: u32) -> PathBuf {
 }
 
 pub fn choose_files() -> Result<Vec<PathBuf>, String> {
-    choose(false)
+    choose(PickKind::Files, None)
 }
 
 pub fn choose_folder() -> Result<Option<PathBuf>, String> {
-    Ok(choose(true)?.into_iter().next())
+    Ok(choose(PickKind::Folder, None)?.into_iter().next())
 }
 
-fn choose(folder: bool) -> Result<Vec<PathBuf>, String> {
+#[derive(Clone, Copy)]
+pub enum PickKind { Files, Folder, Applications }
+
+unsafe fn configured_dialog(kind: PickKind) -> windows::core::Result<IFileOpenDialog> {
+    let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+    let mut options = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
+    options |= if matches!(kind, PickKind::Folder) { FOS_PICKFOLDERS } else { FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT };
+    dialog.SetOptions(options)?;
+    let client = GUID::from_u128(match kind {
+        PickKind::Files => 0x9f7ef149_297f_4aab_a1c9_a38e937ac432,
+        PickKind::Folder => 0x1dc915d7_e039_4d17_9cc1_e3b724d575a5,
+        PickKind::Applications => 0xc350aa84_f864_4ee0_9e92_e167dbfbc6ba,
+    });
+    dialog.SetClientGuid(&client)?;
+    if matches!(kind, PickKind::Applications) {
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("*.exe"), pszSpec: w!("*.exe") }])?;
+        dialog.SetFileTypeIndex(1)?;
+    }
+    Ok(dialog)
+}
+
+pub fn choose(kind: PickKind, owner: Option<usize>) -> Result<Vec<PathBuf>, String> {
+    // Each dialog owns a fresh STA even when its caller uses a COM worker pool.
+    std::thread::spawn(move || choose_on_thread(kind, owner)).join()
+        .map_err(|_| "无法打开系统选择器".to_owned())?
+}
+
+fn choose_on_thread(kind: PickKind, owner: Option<usize>) -> Result<Vec<PathBuf>, String> {
     unsafe {
-        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()
+            .map_err(|error| format!("无法打开系统选择器：{error}"))?;
         let result = (|| -> windows::core::Result<Vec<PathBuf>> {
-            let dialog: IFileOpenDialog =
-                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-            let mut options = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
-            if folder {
-                options |= FOS_PICKFOLDERS;
-            } else {
-                options |= FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT;
-            }
-            dialog.SetOptions(options)?;
-            if let Err(error) = dialog.Show(None) {
+            let dialog = configured_dialog(kind)?;
+            if let Err(error) = dialog.Show(owner.map(|owner| HWND(owner as *mut _))) {
                 if error.code() == windows::core::HRESULT::from_win32(1223) {
                     return Ok(Vec::new());
                 }
@@ -341,9 +378,7 @@ fn choose(folder: bool) -> Result<Vec<PathBuf>, String> {
             Ok(paths)
         })()
         .map_err(|e| format!("无法打开系统选择器：{e}"));
-        if initialized {
-            CoUninitialize();
-        }
+        CoUninitialize();
         result
     }
 }
@@ -351,6 +386,22 @@ fn choose(folder: bool) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_picker_modes_keep_executables_separate_from_shared_files_and_folders() {
+        std::thread::spawn(|| unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            for kind in [PickKind::Files, PickKind::Folder, PickKind::Applications] {
+                let dialog = configured_dialog(kind).unwrap();
+                let options = dialog.GetOptions().unwrap();
+                assert!(options.contains(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT));
+                assert_eq!(options.contains(FOS_PICKFOLDERS), matches!(kind, PickKind::Folder));
+                assert_eq!(options.contains(FOS_ALLOWMULTISELECT), !matches!(kind, PickKind::Folder));
+                if matches!(kind, PickKind::Applications) { assert_eq!(dialog.GetFileTypeIndex().unwrap(), 1); }
+            }
+            CoUninitialize();
+        }).join().unwrap();
+    }
 
     #[test]
     fn batch_sharing_is_atomic_deduplicated_and_removes_only_selected_ids() {

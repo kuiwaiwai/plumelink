@@ -14,7 +14,6 @@ const steps = [
   [process.execPath, [npmCli, "run", "test:rust"], "Rust tests"],
   [process.execPath, ["scripts/verify-qft.mjs"], "QFastTransmission WASM/WSS integration"],
   [process.execPath, ["scripts/verify-qft.mjs", "--mixed"], "audio/input/file concurrency"],
-  [process.execPath, ["scripts/verify-mobile-ui.mjs"], "mobile UI verification"],
   [process.execPath, ["scripts/verify-qft.mjs", "--native-ui"], "Android native UI bridge verification"],
   [process.execPath, ["scripts/verify-desktop-ui.mjs"], "desktop UI verification"],
 ];

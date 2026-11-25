@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { ChevronDown, Activity } from "@lucide/vue";
 import { displayMessage, t } from "../../../shared/i18n";
 import { errorText } from "../../../shared/format";
@@ -19,6 +19,9 @@ const diagnosticResult = ref<{ pointer: { x: number; y: number }; volume: number
 const diagnosticsPanel = ref<HTMLDetailsElement>();
 const micDiag = ref<{ refresh?: () => void } | null>(null);
 const networkName = () => props.state.addresses.find(address => address.address === props.state.selected)?.name || t('未选择');
+const lanRunning = computed(() => props.state.running && (props.state.lanRunning ?? true));
+const usbOnly = computed(() => props.state.running && !lanRunning.value);
+const discoveryStatus = computed(() => !lanRunning.value ? t('未运行') : props.state.discovery.active ? t('已启动广播') : props.state.discovery.error ? t('广播启动失败') : t('未广播'));
 
 function onDiagnosticsToggle(event: Event) {
   if ((event.target as HTMLDetailsElement).open) micDiag.value?.refresh?.();
@@ -30,15 +33,18 @@ async function copyDiagnostics() {
   const report = [
     t("羽连 v{0}", version),
     t("服务：{0}", props.state.running ? t("运行中") : t("已停止")),
-    t("地址：{0}", props.url || t("不可用")),
+    t("无线连接：{0}", lanRunning.value ? t("运行中") : t("未启用")),
+    t("地址：{0}", lanRunning.value ? props.url || t("不可用") : t("未启用")),
+    ...(usbOnly.value ? [t("连接方式：{0}", t("USB 有线连接"))] : []),
     t("网卡数：{0}", props.state.addresses.length),
     t("当前网卡：{0}", networkName()),
     t("配对码更新：{0}", props.state.pairingIntervalMinutes === 0 ? t('手动更新') : t('{0} 分钟', props.state.pairingIntervalMinutes)),
     t("绑定设备：{0}", props.state.pairedCount),
     t("在线设备：{0}", props.state.connectedCount),
-    t("控制模式：{0}", props.state.controlMode),
-    t("局域网发现：{0}", props.state.discovery.active ? t("已广播") : t("未广播")),
-    t("错误：{0}", props.state.error || t("无")),
+    t("控制模式：{0}", props.state.controlMode === 'free' ? t('自由模式') : t('主控模式')),
+    t("局域网发现：{0}", discoveryStatus.value),
+    t("错误：{0}", props.state.error ? displayMessage(props.state.error) : t("无")),
+    ...(lanRunning.value && props.state.discovery.error ? [t("自动发现提示：{0}", displayMessage(props.state.discovery.error))] : []),
     t("手机麦克风：{0}", props.state.microphone?.active ? t('收音中') : t('未在使用')),
   ].join("\n");
   try {
@@ -94,7 +100,11 @@ defineExpose({ focusPanel });
   <details class="help" open>
     <summary>{{ t('连接遇到问题') }}<ChevronDown aria-hidden="true" /></summary>
     <div class="details-body">
-      <p>{{ t('先确认电脑端显示“运行中”。手机请用羽连 App 连接，普通浏览器无法打开遥控界面。') }}</p>
+      <p>{{ t('手机请使用羽连 App 连接。无线连接时，请先启动电脑端的遥控服务；有线连接请在“偏好设置 → USB 有线连接”中选择手机。') }}</p>
+      <h3 class="connection-help-heading">{{ t('USB 有线连接') }}</h3>
+      <p>{{ t('USB 连接不需要同一 Wi-Fi。请使用支持数据传输的数据线，开启手机 USB 调试并允许这台电脑；首次连接仍需在羽连中确认电脑身份和配对码。') }}</p>
+      <p>{{ t('有线连接中断时，重新插接数据线并确认手机授权；仍未恢复时，在“偏好设置 → USB 有线连接”点击“重新检测”，再连接手机。') }}</p>
+      <h3 class="connection-help-heading">{{ t('无线连接') }}</h3>
       <p>{{ t('手机连上 Wi-Fi，电脑连同一个路由器；电脑用网线也可以。若手机在使用移动数据、访客 Wi-Fi 或公司网络，请先换到普通家庭 Wi-Fi 再试。') }}</p>
       <p>{{ t('找不到电脑时，点手机上的“重新搜索”，或扫描电脑二维码；也可以手动输入电脑显示的连接地址。') }}</p>
       <p>{{ t('扫码仍连不上时，核对电脑上的 6 位配对码；过期后用新码。首次连接出现电脑身份确认时，请核对显示的地址。') }}</p>
@@ -108,10 +118,12 @@ defineExpose({ focusPanel });
     <div class="details-body diagnostics">
       <dl>
         <div><dt>{{ t('遥控服务') }}</dt><dd>{{ state.running ? t('运行中') : t('已停止') }}</dd></div>
-        <div><dt>{{ t('连接地址') }}</dt><dd>{{ url || t('不可用') }}</dd></div>
+        <div><dt>{{ t('无线连接') }}</dt><dd>{{ lanRunning ? t('运行中') : t('未启用') }}</dd></div>
+        <div v-if="usbOnly"><dt>{{ t('连接方式') }}</dt><dd>{{ t('USB 有线连接') }}</dd></div>
+        <div><dt>{{ t('连接地址') }}</dt><dd>{{ lanRunning ? url || t('不可用') : t('未启用') }}</dd></div>
         <div><dt>{{ t('当前网卡') }}</dt><dd>{{ networkName() }}</dd></div>
         <div><dt>{{ t('可用网卡') }}</dt><dd>{{ state.addresses.length }}</dd></div>
-        <div><dt>{{ t('自动发现') }}</dt><dd>{{ state.discovery.active ? t('已启动广播') : state.running ? t('广播启动失败') : t('未运行') }}</dd></div>
+        <div><dt>{{ t('自动发现') }}</dt><dd>{{ discoveryStatus }}</dd></div>
         <div><dt>{{ t('配对码更新') }}</dt><dd>{{ state.pairingIntervalMinutes === 0 ? t('手动更新') : t('{0} 分钟', state.pairingIntervalMinutes) }}{{ state.pairingIntervalMinutes !== 0 && state.running ? t(' · 剩余 {0} 分钟', Math.ceil(state.codeRemaining / 60)) : '' }}</dd></div>
         <div><dt>{{ t('设备') }}</dt><dd>{{ state.connectedCount }} {{ t('在线 /') }} {{ state.pairedCount }} {{ t('已绑定') }}</dd></div>
         <div><dt>{{ t('控制模式') }}</dt><dd>{{ state.controlMode === 'free' ? t('自由模式') : t('主控模式') }}</dd></div>
@@ -119,7 +131,7 @@ defineExpose({ focusPanel });
         <div v-if="state.microphone?.active"><dt>{{ t('声音接收') }}</dt><dd>{{ state.microphone.receivedFrames }} {{ t('帧') }} · {{ state.microphone.renderedSignalSamples }} {{ t('个样本已送出') }}</dd></div>
         <div v-if="state.error"><dt>{{ t('服务提示') }}</dt><dd>{{ displayMessage(state.error) }}</dd></div>
       </dl>
-      <p v-if="state.discovery.error" class="hint" role="status">{{ displayMessage(state.discovery.error) }}{{ t('。可先用二维码或地址连接。') }}</p>
+      <p v-if="lanRunning && state.discovery.error" class="hint" role="status">{{ displayMessage(state.discovery.error) }}{{ t('。可先用二维码或地址连接。') }}</p>
       <div class="diagnostic-actions">
         <button :disabled="busy" @click="runDiagnostics">{{ t('运行本机自检') }}</button>
         <button :disabled="busy" @click="copyDiagnostics">{{ t('复制脱敏诊断信息') }}</button>
@@ -131,3 +143,7 @@ defineExpose({ focusPanel });
     </div>
   </details>
 </template>
+
+<style scoped>
+.connection-help-heading { margin: 18px 0 8px; font-size: 13px; font-weight: 600; color: var(--text); }
+</style>

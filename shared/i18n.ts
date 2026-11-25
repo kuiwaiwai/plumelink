@@ -76,8 +76,7 @@ for (const key of messageKeys) {
   savedMessages.set(traditional[key], key);
 }
 
-// Service errors can contain an OS-provided detail. Translate the known wrapper
-// and leave the detail (including paths and device names) intact.
+// Translate known wrappers while preserving filenames, paths and OS details.
 const serviceMessages = servicePatterns.map(pattern => {
   const [prefix, suffix] = pattern.split("{0}");
   return { key: pattern as MessageKey, prefix, suffix };
@@ -86,6 +85,9 @@ export function displayMessage(value?: string | null): string {
   if (!value) return "";
   const key = savedMessages.get(value);
   if (key) return t(key);
+  const lines = value.split("\n");
+  if (lines.length > 1 && lines.every(line => savedMessages.has(line)))
+    return lines.map(line => t(savedMessages.get(line)!)).join("\n");
   for (const { key, prefix, suffix } of serviceMessages) {
     if (value.startsWith(prefix) && value.endsWith(suffix)) {
       return t(key, value.slice(prefix.length, value.length - suffix.length));

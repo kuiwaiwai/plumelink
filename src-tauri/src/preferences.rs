@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
+const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 const DPAPI_PREFIX: &str = "dpapi:";
 
 #[cfg(windows)]
@@ -205,7 +206,9 @@ pub struct Preferences {
     pub address: String,
     #[serde(deserialize_with = "deserialize_service_port")]
     pub service_port: u16,
+    pub adb_path: String,
     pub receive_dir: String,
+    pub applications: Vec<crate::launcher::Entry>,
     pub audio_output: String,
     pub audio_output_name: String,
     pub microphone_gain_db: u8,
@@ -233,7 +236,9 @@ impl Default for Preferences {
             autostart: None,
             address: String::new(),
             service_port: DEFAULT_SERVICE_PORT,
+            adb_path: String::new(),
             receive_dir: String::new(),
+            applications: Vec::new(),
             audio_output: String::new(),
             audio_output_name: String::new(),
             microphone_gain_db: 6,
@@ -258,6 +263,8 @@ pub enum ControlMode {
 pub struct PairedDevice {
     pub id: String,
     pub name: String,
+    pub reported_name: String,
+    pub name_customized: bool,
     pub token_digest: String,
     pub permissions: DevicePermissions,
     pub paired_at: u64,
@@ -268,6 +275,8 @@ impl Default for PairedDevice {
         Self {
             id: String::new(),
             name: "移动设备".into(),
+            reported_name: String::new(),
+            name_customized: false,
             token_digest: String::new(),
             permissions: DevicePermissions::default(),
             paired_at: 0,
@@ -350,10 +359,15 @@ impl Store {
         }))
     }
     pub fn open(path: PathBuf) -> Result<SharedStore, String> {
-        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 1024 * 1024) {
-            return Err("设置文件过大，拒绝加载凭证".into());
-        }
-        let mut data: Preferences = match fs::read(&path) {
+        let read = fs::File::open(&path).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take((MAX_SETTINGS_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        let mut data: Preferences = match read {
+            Ok(bytes) if bytes.len() > MAX_SETTINGS_BYTES => {
+                return Err("设置文件过大，拒绝加载凭证".into());
+            }
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| format!("无法读取已配对设备设置：{e}"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preferences::default(),
@@ -454,6 +468,9 @@ impl Store {
             }
             let payload =
                 serde_json::to_vec(&disk).map_err(|e| format!("无法保存设置，操作未完成：{e}"))?;
+            if payload.len() > MAX_SETTINGS_BYTES {
+                return Err("设置内容过大，请减少保存的内容后重试".into());
+            }
             let save = || -> std::io::Result<()> {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
@@ -517,6 +534,32 @@ mod tests {
                 .as_nanos()
         ))
     }
+    #[test]
+    fn oversized_save_preserves_memory_and_disk() {
+        let path = path();
+        let store = Store::open(path.clone()).unwrap();
+        store.lock().unwrap().update(|p| p.address = "saved".into()).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(store.lock().unwrap().update(|p| p.address = "x".repeat(MAX_SETTINGS_BYTES)).is_err());
+        assert_eq!(store.lock().unwrap().get().address, "saved");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(Store::open(path.clone()).unwrap().lock().unwrap().get().address, "saved");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn settings_read_accepts_limit_and_rejects_one_byte_more() {
+        let path = path();
+        let mut bytes = br#"{"address":"saved"}"#.to_vec();
+        bytes.resize(MAX_SETTINGS_BYTES, b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(Store::open(path.clone()).unwrap().lock().unwrap().get().address, "saved");
+        bytes.push(b' ');
+        fs::write(&path, bytes).unwrap();
+        assert!(Store::open(path.clone()).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn administrator_permission_survives_restart_and_remains_per_device() {
         let path = path();

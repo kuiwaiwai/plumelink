@@ -10,7 +10,8 @@ import java.util.Map;
 final class PairingLink {
     final String address;
     final String code;
-    private PairingLink(String address, String code) { this.address = address; this.code = code; }
+    final String usbAccess;
+    private PairingLink(String address, String code, String usbAccess) { this.address = address; this.code = code; this.usbAccess=usbAccess; }
 
     static PairingLink parse(String value) {
         if (value == null || value.length() > 1024) return null;
@@ -25,7 +26,7 @@ final class PairingLink {
                 if (entry.length != 2) return null;
                 String key = URLDecoder.decode(entry[0], StandardCharsets.UTF_8.name());
                 String content = URLDecoder.decode(entry[1], StandardCharsets.UTF_8.name());
-                if (!("address".equals(key) || "code".equals(key)) || params.put(key, content) != null) return null;
+                if (!("address".equals(key) || "code".equals(key) || "usb".equals(key)) || params.put(key, content) != null) return null;
             }
             String address = params.getOrDefault("address", "");
             String code = params.getOrDefault("code", "");
@@ -33,7 +34,9 @@ final class PairingLink {
             URI endpoint = new URI("https://" + address);
             if (endpoint.getHost() == null || endpoint.getPort() < 1 || endpoint.getPort() > 65535) return null;
             if (params.containsKey("code") && !code.matches("[0-9]{6}")) return null;
-            return new PairingLink(address, code);
+            String usb = params.getOrDefault("usb", "");
+            if (params.containsKey("usb") && (!"127.0.0.1".equals(endpoint.getHost()) || !UsbAccess.validKey(usb))) return null;
+            return new PairingLink(address, code, usb);
         } catch (Exception ignored) { return null; }
     }
 }

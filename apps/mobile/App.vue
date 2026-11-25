@@ -1,31 +1,33 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
-import { ArrowLeftRight, Volume1, Volume2, VolumeX, ChevronLeft, ChevronRight, Play, CornerDownLeft, Keyboard, Ellipsis, Maximize2, Minimize2 } from "@lucide/vue";
 import { displayMessage, languageOptions, languagePreference, locale, t } from "../../shared/i18n";
 import { errorText, formatBytes } from "../../shared/format";
+import type { Destination } from "./native/navigation";
 import type { Command } from "../../shared/protocol";
 import { androidBridge } from "./native/bridge";
-import { useConnection, type RemoteWindow } from "./connection";
-import { useFileTransfers } from "./composables/useFileTransfers";
+import { useConnection } from "./connection";
+import { useWindowPicker } from "./composables/useWindowPicker";
+import { useConnectionRecovery } from "./composables/useConnectionRecovery";
+import { downloadRecoveryLabel, downloadRecoveryStatus, useFileTransfers } from "./composables/useFileTransfers";
+import { useSharedFiles, type SharedSelectionFile } from "./composables/useSharedFiles";
 import { useTouchpad } from "./composables/useTouchpad";
+import { DirectionalRepeat, type Direction } from "./directional-repeat";
 import { useMobileSettings } from "./composables/useMobileSettings";
-import BottomSheet from "./components/BottomSheet.vue";
-import AppNavigation, { type Destination } from "./components/AppNavigation.vue";
-import MicrophoneControl from "./components/MicrophoneControl.vue";
-import TouchSurface from "./components/TouchSurface.vue";
-import SettingsScreen from "./components/SettingsScreen.vue";
-import FilesScreen from "./components/FilesScreen.vue";
-import KeyboardSheet from "./components/sheets/KeyboardSheet.vue";
-import MoreActionsSheet from "./components/sheets/MoreActionsSheet.vue";
-import WindowSwitchSheet from "./components/sheets/WindowSwitchSheet.vue";
-import ShutdownSheet from "./components/sheets/ShutdownSheet.vue";
-import PairSheet from "./components/sheets/PairSheet.vue";
-import ConnectionSheet from "./components/sheets/ConnectionSheet.vue";
-import HelpSheet from "./components/sheets/HelpSheet.vue";
-import { asPointerEvent, heading, row, text, type NativeControl, type NativePointer, type NativePointerMoveBatch } from "./native/ui";
+import { useCustomShortcut } from "./composables/useCustomShortcut";
+import { useShortcutPlans } from "./composables/useShortcutPlans";
+import { builtinPlan, matchingSlots, maxShortcutPlans } from "./shortcut-plans";
+import { keyboardModifiers } from "../../shared/keyboard";
+import { parseCustomShortcut, chordCommand, chordLabel, keyGroups, keyLabel } from "./custom-shortcuts";
+import { asPointerEvent, heading, recoveryActionId, row, text, type NativeControl, type NativePointer, type NativePointerMoveBatch } from "./native/ui";
+import { bindSheetActions, bindScreenActions, dispatchNativeAction, currentNativeInput } from "./native/actions";
 import { useMicrophone } from "./composables/useMicrophone";
-import { shortcutIconNames } from "./shortcut-icons";
-import "./style.css";
+import { canStartMicrophone, canRestartMicrophone, microphoneGuidance, useMicrophoneStatus } from "./composables/useMicrophoneStatus";
+import { shortcuts as shortcutCatalog, shortcutOptions, shortcutPresets, presetOptions, shortcutLabel } from "./shortcuts";
+import { browseFiles, type FileOrder } from "../../shared/file-list";
+import { browseChoices } from "../../shared/choice-list";
+import { thumbnail } from "../../shared/thumbnail";
+import { useApplications } from "./composables/useApplications";
+import { shortcutIconNames, shortcutIconLabels } from "./shortcut-icons";
 
 const remote = useConnection();
 const { status, message, connectionLabel } = remote;
@@ -37,7 +39,7 @@ const canText = computed(() => online.value && remote.permissions.value.text && 
 const canFiles = computed(() => online.value && remote.permissions.value.files);
 const canPower = computed(() => online.value && remote.permissions.value.power && hasControl.value);
 
-type Panel = "keyboard" | "more" | "settings" | "windows" | "pair" | "shutdown" | "files" | "connection" | "help";
+type Panel = "shortcut-plans" | "applications" | "unfinished" | "shared-file" | "microphone" | "keyboard" | "more" | "settings" | "windows" | "pair" | "shutdown" | "files" | "folder" | "connection" | "help";
 const panel = ref<Panel | null>(null);
 const destination = ref<Destination>("remote");
 const code = ref("");
@@ -46,12 +48,7 @@ const sending = ref(false);
 const feedback = ref("");
 const switcher = ref(false);
 const switchExpired = ref(false);
-const windowList = ref<RemoteWindow[]>([]);
-const windowLoading = ref(false);
-const windowError = ref("");
-const windowNotice = ref("");
-const windowSwitching = ref(0);
-const openingTaskView = ref(false);
+const pageForeground = ref(!document.hidden);
 const switchHelp = computed(() => switcher.value ? t("看着电脑屏幕，连续选择后确认。")
   : switchExpired.value ? t("选择已结束，可继续切换窗口") : t("点击上一个或下一个，继续选择窗口。"));
 const magnifier = ref(false);
@@ -63,15 +60,17 @@ const microphoneLocked = ref(false);
 const microphoneActive = ref(false);
 const textFeedback = ref("");
 const pairing = ref(false);
-const connectionAddress = location.host;
-const keyboardSheet = ref<{ resetComposing?: () => void } | null>(null);
+const connectionAddress = computed(() => location.hostname === "127.0.0.1" ? t("USB 有线连接") : location.host);
 
 const android = androidBridge();
+const connectionRecovery = useConnectionRecovery(android, remote, input,
+  computed(() => panel.value === "connection"), pageForeground);
 const {
   sensitivity,
   keepAwake,
   keepAlive,
   haptics,
+  hardwareVolume,
   theme,
   darkAppearance,
   shortcutA,
@@ -80,6 +79,8 @@ const {
   shortcutIconA,
   shortcutIconB,
   shortcutIconC,
+  shortcutPlans,
+  applyShortcuts,
   longPressDrag,
   scrollDirection,
   responseMode,
@@ -87,12 +88,37 @@ const {
   focusMode,
   controlMode,
   dialSize,
+  microphoneMode,
   immersive,
   syncWakeLock,
 } = useMobileSettings(android, online, destination, mode => remote.setResponseMode(mode));
+const { editing: customEditing, draft: customDraft, group: customGroup, error: customError, models: shortcutModels,
+  toggle: toggleCustomModifier, save: saveCustomShortcut, close: closeCustomShortcut } = useCustomShortcut([shortcutA, shortcutB, shortcutC]);
+const currentShortcuts = () => [shortcutA, shortcutB, shortcutC].map((slot, index) => ({
+  action: slot.value, icon: [shortcutIconA, shortcutIconB, shortcutIconC][index].value,
+}));
+const plans = useShortcutPlans(shortcutPlans, currentShortcuts, applyShortcuts);
+const planOrigin = ref<"more" | "settings">("settings");
+watch(panel, value => { if (value !== "shortcut-plans") plans.reset(); });
+function openShortcutPlans() {
+  planOrigin.value = panel.value === "more" ? "more" : "settings";
+  plans.reset(); openPanel("shortcut-plans");
+}
+function leaveShortcutPlans() { if (planOrigin.value === "more") openPanel("more"); else closePanel(); }
 
-const { sharedFiles, filesLoading, filesError, transferBusy, transferCancelling, transferProgress, transferMessage, transferHistory, androidFolder, folderReady, loadFiles, uploadFiles, downloadFile, cancelTransfer, clearTransferHistory } =
+const { sharedFiles, filesLoading, filesError, transferBusy, canStartTransfer, transferCancelling, transferProgress, transferMessage, transferHistory, androidFolder, folderReady, loadFiles, chooseUploadFiles, downloadFile, cancelTransfer, clearTransferHistory, unfinishedDownloads, recoveryBusy, recoveryMessage, resolveUnfinishedDownload } =
   useFileTransfers(remote, canFiles, microphoneActive);
+const sharedSelection = useSharedFiles(canStartTransfer);
+const sharedFileDetail = ref<SharedSelectionFile>();
+watch(sharedSelection.openRequest, () => navigate("files"));
+watch(sharedSelection.selection, value => {
+  if (panel.value !== "shared-file" || !sharedFileDetail.value) return;
+  sharedFileDetail.value = value.files.find(file => file.id === sharedFileDetail.value?.id);
+  if (!sharedFileDetail.value) closePanel();
+});
+const confirmUnfinished = ref<{ id: string; version: string }>();
+const expandedUnfinished = ref<{ id: string; version: string }>();
+watch(panel, () => { confirmUnfinished.value = undefined; expandedUnfinished.value = undefined; });
 
 let feedbackTimer: ReturnType<typeof setTimeout>;
 let switchTimer: ReturnType<typeof setTimeout>;
@@ -102,6 +128,7 @@ function notice(text: string, durationMs = 4500) {
   clearTimeout(feedbackTimer);
   feedbackTimer = setTimeout(() => { feedback.value = ""; }, durationMs);
 }
+function dismissFeedback() { feedback.value = ""; clearTimeout(feedbackTimer); }
 
 function clearSwitchTimer() {
   switcher.value = false;
@@ -122,7 +149,7 @@ const touchpad = useTouchpad({
   onMotionSent: clearSwitchTimer,
 });
 
-async function action(command: Command) {
+async function action(command: Command, haptic = true) {
   if (command.type === "release") {
     touchpad.clearMotion();
     remote.clearMotion();
@@ -132,7 +159,7 @@ async function action(command: Command) {
   if (command.type !== "switch") clearSwitchTimer();
   try {
     await remote.send(command);
-    if (haptics.value && command.type !== "move" && command.type !== "scroll") {
+    if (haptic && haptics.value && command.type !== "move" && command.type !== "scroll") {
       if (android?.haptic) android.haptic();
       else navigator.vibrate?.(10);
     }
@@ -144,6 +171,8 @@ async function action(command: Command) {
 }
 
 function resetInteraction() {
+  directionalRepeat.stop();
+  volumeRepeat.stop();
   touchpad.reset();
   clearSwitchTimer();
 }
@@ -159,6 +188,8 @@ function navigate(next: Destination) {
     return;
   }
   cancelInteraction();
+  closeCustomShortcut();
+  nativeChoices.value = "";
   feedback.value = "";
   panel.value = null;
   destination.value = next;
@@ -170,20 +201,34 @@ watch(destination, next => {
 });
 
 function handleBack() {
+  if (customEditing.value !== null) { closeCustomShortcut(); return true; }
+  if (nativeChoices.value) { nativeChoices.value = ""; return true; }
+  if (panel.value === "shortcut-plans") { if (!plans.back()) leaveShortcutPlans(); return true; }
   if (android?.renderNativeUi && panel.value) { closePanel(); return true; }
-  const dialogs = document.querySelectorAll<HTMLDialogElement>("dialog[open]");
-  const active = dialogs[dialogs.length - 1];
-  if (active) {
-    active.dispatchEvent(new Event("cancel", { cancelable: true }));
-    return true;
-  }
+  if (destination.value === "windows" && windowSearchShown.value) { toggleWindowSearch(); return true; }
   if (destination.value !== "remote") { navigate("remote"); return true; }
   if (focusMode.value) { focusMode.value = false; return true; }
   return false;
 }
 
 const screenTitle = computed(() => ({ remote: t("遥控"), files: t("文件"), settings: t("设置"), keyboard: t("键盘"), windows: t("切换窗口") })[destination.value]);
+const directionalRepeat = new DirectionalRepeat({
+  enabled: () => canInput.value && destination.value === "remote" && controlMode.value === "dpad" && !panel.value && customEditing.value === null,
+  send: (key, repeating) => action({ type: "key", key }, !repeating),
+});
+watch([canInput, destination, controlMode, panel, customEditing], () => directionalRepeat.stop(), { flush: "sync" });
+const hardwareVolumeActive = computed(() => hardwareVolume.value && canInput.value && destination.value === "remote" && !panel.value && customEditing.value === null);
+const volumeRepeat = new DirectionalRepeat<"up" | "down">({
+  enabled: () => hardwareVolumeActive.value,
+  send: direction => action({ type: "volume", action: direction }, false),
+});
+watch(hardwareVolumeActive, () => volumeRepeat.stop(), { flush: "sync" });
 const titles = computed(() => ({
+  "shortcut-plans": t("快捷方案"),
+  microphone: t("麦克风状态与帮助"),
+  "shared-file": t("文件"),
+  unfinished: t("未完成的接收"),
+  applications: t("快捷启动"),
   keyboard: t("键盘"),
   more: t("更多操作"),
   settings: t("设置"),
@@ -191,6 +236,7 @@ const titles = computed(() => ({
   pair: t("连接电脑"),
   shutdown: t("关闭电脑"),
   files: t("文件传输"),
+  folder: t("Android 接收目录"),
   connection: t("当前电脑"),
   help: t("操作指南"),
 }));
@@ -238,14 +284,14 @@ function cycle(actionName: "next" | "previous" | "confirm" | "cancel") {
 }
 
 async function sendText() {
-  keyboardSheet.value?.resetComposing?.();
   if (!canText.value || sending.value || !input.value) return;
   const value = input.value;
+  const revision = editRevisions.draft.value;
   sending.value = true;
   textFeedback.value = "";
   try {
     await remote.send({ type: "text", text: value });
-    if (input.value === value) input.value = "";
+    if (input.value === value && editRevisions.draft.value === revision) input.value = "";
     textFeedback.value = t("已发送到电脑当前光标位置");
   } catch (e) {
     textFeedback.value = errorText(e, t("文字发送失败"));
@@ -254,82 +300,17 @@ async function sendText() {
   }
 }
 
-let windowRequest: AbortController | undefined;
-let windowPageGeneration = 0;
-watch([destination, canInput], ([page, allowed]) => {
-  windowPageGeneration++;
-  windowRequest?.abort();
-  windowRequest = undefined;
-  windowLoading.value = false;
-  windowList.value = [];
-  windowError.value = "";
-  windowNotice.value = "";
-  windowSwitching.value = 0;
-  openingTaskView.value = false;
-  if (page === "windows" && allowed) void loadWindows();
-});
-
-async function loadWindows() {
-  if (!canInput.value || windowLoading.value) return;
-  const request = new AbortController();
-  windowRequest = request;
-  windowList.value = [];
-  windowLoading.value = true;
-  windowError.value = "";
-  try {
-    const windows = await remote.listWindows(request.signal);
-    if (request !== windowRequest) return;
-    windowList.value = windows;
-    windowNotice.value = "";
-  } catch (e) {
-    if (request === windowRequest) windowError.value = errorText(e, t("无法获取窗口列表"));
-  } finally {
-    if (request === windowRequest) {
-      windowRequest = undefined;
-      windowLoading.value = false;
-    }
-  }
-}
-
-async function switchWindow(entry: RemoteWindow) {
-  if (!canInput.value || openingTaskView.value || windowSwitching.value) return;
-  const generation = windowPageGeneration;
-  windowSwitching.value = entry.hwnd;
-  windowNotice.value = t("正在切换…");
-  windowError.value = "";
-  try {
-    await remote.switchWindow(entry.hwnd);
-    if (generation !== windowPageGeneration) return;
-    windowNotice.value = t("已切换到 {0}", entry.title);
-  } catch (e) {
-    if (generation !== windowPageGeneration) return;
-    const message = errorText(e, t("切换窗口失败"));
-    windowNotice.value = "";
-    windowError.value = message === "系统拒绝切换到该窗口，请先在电脑上激活任意窗口后重试"
-      ? "窗口尚未切到前台，请打开任务视图选择窗口" : message;
-    if (message.includes("窗口已关闭")) void loadWindows();
-  } finally {
-    if (generation === windowPageGeneration) windowSwitching.value = 0;
-  }
-}
-
-async function openWindowTaskView() {
-  if (!canInput.value || windowSwitching.value || openingTaskView.value) return;
-  const generation = windowPageGeneration;
-  openingTaskView.value = true;
-  try {
-    const opened = await action({ type: "taskview" });
-    if (opened && generation === windowPageGeneration) navigate("remote");
-  } finally {
-    if (generation === windowPageGeneration) openingTaskView.value = false;
-  }
-}
+const { windowList, visibleWindows, windowQuery, windowSearchShown, toggleWindowSearch,
+  windowLoading, windowListReady, windowError, windowSwitching, openingTaskView,
+  loadWindows, switchWindow, openWindowTaskView, setWindowInteracting } = useWindowPicker(
+  remote, destination, canInput, computed(() => pageForeground.value && !panel.value), notice, dismissFeedback,
+  () => action({ type: "taskview" }), () => navigate("remote"),
+);
 
 function closePanel() {
   cancelInteraction();
   feedback.value = "";
   panel.value = null;
-  keyboardSheet.value?.resetComposing?.();
 }
 
 function openPanel(name: Panel) {
@@ -343,14 +324,31 @@ function openPanel(name: Panel) {
   if (name === "windows") cycle("next");
 }
 
+watch(folderReady, ready => { if (!ready && panel.value === "folder") closePanel(); });
+
 function runShortcut(value: string) {
-  if (value === "mute") void action({ type: "volume", action: "mute" });
-  else if (value === "magnifier") void toggleMagnifier();
-  else if (value === "taskview") void action({ type: "taskview" });
-  else if (value === "notifications") void action({ type: "notifications" });
-  else if (value === "previousapp" || value === "nextapp") void action({ type: "appswitch", direction: value === "previousapp" ? "left" : "right" });
-  else if (value === "virtualleft" || value === "virtualright") void action({ type: "virtualdesktop", direction: value === "virtualleft" ? "left" : "right" });
+  const chord = parseCustomShortcut(value);
+  if (chord) {
+    if (!remote.features.value.includes("custom-keys")) { notice(t("请更新电脑端以使用自定义按键")); return; }
+    void action(chordCommand(chord)); return;
+  }
+  if (value === "applications") { openPanel("applications"); return; }
+  if (value === "magnifier") { void toggleMagnifier(); return; }
+  const command = shortcutCatalog.find(item => item.value === value)?.command;
+  if (command) void action(command);
 }
+
+const { applications, applicationQuery, applicationSearchShown, visibleApplications, applicationsLoading, applicationsReady,
+  applicationPending, applicationPendingDetail, applicationsError, applicationActionError, applicationsNotice, refreshApplications, unavailableApplication, launchApplication } = useApplications(remote, panel, canInput);
+
+const shortcutPreset = computed({
+  get: () => shortcutPresets.find(preset => matchingSlots(builtinPlan("builtin:" + preset.value)!.shortcuts, currentShortcuts()))?.value || "custom",
+  set: (value: string) => {
+    const preset = shortcutPresets.find(item => item.value === value);
+    if (!preset) return;
+    applyShortcuts(builtinPlan("builtin:" + preset.value)!.shortcuts);
+  },
+});
 
 function requestShutdown() {
   if (android) android.confirmSensitiveAction("shutdown");
@@ -379,13 +377,10 @@ async function pair() {
   if (pairing.value || !/^[0-9]{6}$/.test(code.value) || status.value === "connecting") return;
   pairing.value = true;
   try { await remote.pair(code.value, android?.getDeviceName() || t("Android 设备")); }
-  finally { pairing.value = false; }
-}
-
-function connectionClick() {
-  if (status.value === "unpaired") openPanel("pair");
-  else if (!online.value) remote.resume();
-  else openPanel("connection");
+  finally {
+    pairing.value = false;
+    if (pageForeground.value && remote.token()) remote.resume();
+  }
 }
 
 async function requestControl() {
@@ -395,19 +390,23 @@ async function requestControl() {
 }
 
 function visibility() {
+  pageForeground.value = !document.hidden;
   resetInteraction();
-  if (document.hidden && !(android && keepAlive.value)) remote.suspend();
-  else if (panel.value !== "pair") remote.resume();
+  if (document.hidden) remote.suspend();
+  else pageshow();
   void syncWakeLock();
 }
 
 function pagehide() {
+  pageForeground.value = false;
   resetInteraction();
-  if (!(android && keepAlive.value)) remote.suspend();
+  remote.suspend();
 }
 
 function pageshow() {
-  if (document.hidden || pairing.value || panel.value === "pair") return;
+  pageForeground.value = !document.hidden;
+  if (!pageForeground.value || pairing.value || (panel.value === "pair" && !remote.token())) return;
+  refreshKeepAliveState();
   remote.resume();
   if (destination.value === "files" && canFiles.value && !filesLoading.value) void loadFiles();
   if (keepAwake.value && remote.status.value === "connected") android?.setKeepAwake?.(true);
@@ -426,10 +425,24 @@ watch([online, () => remote.primary.value], ([connected]) => {
 });
 
 watch(status, value => {
-  if (value === "unpaired") openPanel("pair");
+  if (value === "unpaired" && !remote.usbExpired.value) openPanel("pair");
 });
+watch(remote.usbExpired, expired => {
+  if (expired && panel.value === "pair") openPanel("connection");
+});
+const keepAliveFailed = ref(false);
+const backgroundBatteryRestricted = ref(false);
+const backgroundProtocolUnsupported = ref(false);
+function refreshKeepAliveState() {
+  try {
+    const state = JSON.parse(android?.getConnectionKeepAliveState?.() || "{}");
+    keepAliveFailed.value = state.failed === true;
+    backgroundBatteryRestricted.value = state.batteryRestricted === true;
+    backgroundProtocolUnsupported.value = state.terminalCode === 4002;
+  } catch {}
+}
 watch([keepAlive, status], ([enabled]) => {
-  remote.setBackgroundAllowed(!!android && enabled);
+  remote.setBackgroundAllowed(false);
   android?.setConnectionKeepAlive?.(enabled && !!remote.token());
 }, { immediate: true });
 
@@ -439,6 +452,28 @@ const nativeMic = nativeUi ? useMicrophone({
   get allowed() { return (status.value !== "unpaired" && remote.permissions.value.microphone) || microphoneLocked.value; },
   get activePage() { return destination.value === "remote" && !panel.value; },
 }, notice) : undefined;
+const microphoneDetails = ref(false);
+const microphoneStatus = useMicrophoneStatus(remote, computed(() => panel.value === "microphone"), online,
+  computed(() => remote.permissions.value.microphone), pageForeground);
+const microphoneStartState = computed(() => ({
+  online: online.value, allowed: remote.permissions.value.microphone && !microphoneStatus.denied.value,
+  foreground: pageForeground.value,
+  usbExpired: remote.usbExpired.value, active: microphoneActive.value,
+  value: online.value ? microphoneStatus.data.value : undefined, readError: microphoneStatus.error.value, reading: false,
+}));
+const microphoneStartAllowed = computed(() => !!nativeMic && !nativeMic.lastIssue.value && canStartMicrophone(microphoneStartState.value));
+const microphoneRecoveryAllowed = computed(() => !!nativeMic && canRestartMicrophone({
+  ...microphoneStartState.value, phoneAllowed: nativeMic.permissionGranted.value === true, issue: nativeMic.lastIssue.value,
+}));
+function startMicrophone() {
+  if (microphoneStartAllowed.value && !microphoneStatus.loading.value && !microphoneStatus.manualRefreshing.value)
+    nativeMic?.startLocked();
+}
+function restartMicrophone() {
+  if (microphoneRecoveryAllowed.value && !microphoneStatus.loading.value && !microphoneStatus.manualRefreshing.value)
+    nativeMic?.restartLocked();
+}
+watch(panel, next => { if (next !== "microphone") microphoneDetails.value = false; });
 if (nativeMic) watch(nativeMic.mode, mode => {
   microphoneLocked.value = mode === "locked" || nativeMic.lockedSession.value;
   microphoneActive.value = mode !== "idle";
@@ -446,30 +481,45 @@ if (nativeMic) watch(nativeMic.mode, mode => {
 
 const nativeActions = new Map<string, (value: unknown) => unknown>();
 function nativeEvent(event: Event) {
-  const detail = (event as CustomEvent<{ id: string; value: unknown }>).detail;
-  nativeActions.get(detail.id)?.(detail.value);
+  if (!currentNativeInput((event as CustomEvent<unknown>).detail,pageForeground.value,android?.getInputEpoch?.())) return;
+  dispatchNativeAction(nativeActions, (event as CustomEvent<unknown>).detail, nativeSheetRevision.value, nativeSheetOpen.value, nativeScreenRevision.value);
 }
 function nativePointer(event: Event) {
   const point = (event as CustomEvent<NativePointer | NativePointerMoveBatch>).detail;
+  if (!currentNativeInput(point,pageForeground.value,android?.getInputEpoch?.())) return;
   if (point.phase === "move-batch") {
     touchpad.moveTogether(point.contacts);
     return;
   }
   const pointer = asPointerEvent(point);
-  if (point.phase === "lost") { touchpad.captureLost(pointer); return; }
   if (point.target === "mic" && nativeMic) {
-    if (point.phase === "cancel") nativeMic.stop();
+    if (point.phase === "cancel") nativeMic.up();
+    else if (point.phase === "lost") nativeMic.up(pointer);
     else if (point.phase === "up") nativeMic.up(pointer, true);
     else nativeMic[point.phase](pointer);
-  } else if (point.phase === "cancel") touchpad.cancel();
+  } else if (point.phase === "lost") touchpad.captureLost(pointer);
+  else if (point.phase === "cancel") touchpad.cancel();
   else touchpad[point.phase](pointer);
 }
 
+const fileQuery = ref("");
+const fileOrder = ref<FileOrder>("default");
+const visibleFiles = computed(() => browseFiles(sharedFiles.value, fileQuery.value, fileOrder.value, locale.value));
 const nativeChoices = ref("");
+const nativeSheetRevision = ref(0);
+const nativeScreenRevision = ref(0);
+const nativeSheetOpen = computed(() => !!panel.value || !!nativeChoices.value || customEditing.value !== null);
+watch([panel, nativeChoices, customEditing], () => { nativeSheetRevision.value++; }, { flush: "sync" });
+if (nativeMic) watch(nativeMic.mode, (mode, previous) => {
+  if (panel.value === "microphone" && (mode === "locked") !== (previous === "locked")) nativeSheetRevision.value++;
+}, { flush: "sync" });
+watch([plans.stage, plans.selected], () => { nativeSheetRevision.value++; }, { flush: "sync" });
+watch(destination, () => { nativeScreenRevision.value++; }, { flush: "sync" });
+const shortcutQuery = ref("");
 const nativeHistoryOpen = ref(false);
 const nativeDiagnosticsOpen = ref(false);
 watch(panel, value => { if (value !== "connection") nativeDiagnosticsOpen.value = false; });
-const editRevisions = { code: ref(0), draft: ref(0) };
+const editRevisions = { code: ref(0), draft: ref(0), "file-filter": ref(0), "shortcut-filter": ref(0), "application-filter": ref(0), "window-filter": ref(0), "plan-name": ref(0) };
 function nativeEdit(id: keyof typeof editRevisions, model: { value: string }, label: string): NativeControl {
   const revision = editRevisions[id];
   nativeActions.set(id, value => {
@@ -483,12 +533,26 @@ function nativeEdit(id: keyof typeof editRevisions, model: { value: string }, la
 if (nativeUi) watchEffect(() => {
   nativeActions.clear();
   nativeActions.set("back-remote", () => navigate("remote"));
+  if (hardwareVolumeActive.value) for (const direction of ["up", "down"] as const) {
+    nativeActions.set("hardware-volume-" + direction, value => {
+      if (value === true) volumeRepeat.press(direction);
+      else if (value === false) volumeRepeat.release(direction);
+    });
+  }
   const button = (id: string, label: string, callback: () => unknown, enabled = true, detail?: string): NativeControl => {
     if (enabled) nativeActions.set(id, callback);
     return { kind: "button", id, label, enabled, detail };
   };
   const key = (id: string, label: string, key: Extract<Command, { type: "key" }>["key"]) =>
     button(id, label, () => action({ type: "key", key }), canInput.value);
+  const direction = (id: string, label: string, key: Direction): NativeControl => {
+    if (canInput.value) nativeActions.set(id, value => {
+      if (value === true) directionalRepeat.press(key);
+      else if (value === false) directionalRepeat.release(key);
+      else return directionalRepeat.tap(key);
+    });
+    return { kind: "button", id, label, enabled: canInput.value };
+  };
   const command = (id: string, label: string, cmd: Command) => button(id, label, () => action(cmd), canInput.value);
   const toggle = (id: string, label: string, model: { value: boolean }, detail: string): NativeControl => {
     nativeActions.set(id, value => { model.value = value === true; });
@@ -498,37 +562,44 @@ if (nativeUi) watchEffect(() => {
   const sheet: NativeControl[] = [];
   let sheetTitle = panel.value ? titles.value[panel.value] : "";
   let sheetIcon = "";
-  const choice = (id: string, label: string, model: { value: string }, options: { value: string; label: string; icon?: string; description?: string }[]) => {
+  const sheetActions: NativeControl[] = [];
+  const sheetFooter: NativeControl[] = [];
+  const choice = (id: string, label: string, model: { value: string }, options: { value: string; label: string; icon?: string; description?: string; group?: string }[], enabled = true) => {
     const selected = options.find(item => item.value === model.value);
-    controls.push({ ...button(id, label, () => { nativeChoices.value = id; }, true, selected?.label), icon: selected?.icon });
+    controls.push({ ...button(id, label, () => { shortcutQuery.value = ""; nativeChoices.value = id; }, enabled, selected?.label), icon: selected?.icon });
     if (nativeChoices.value !== id) return;
     sheetTitle = label;
     if (id.startsWith("icon-")) {
       const slot = slots[Number(id.slice(5))];
-      const actionName = shortcuts.find(([value]) => value === slot?.value)?.[1];
+      const actionName = slot && shortcutLabel(slot.value);
       if (actionName && selected) {
         sheetTitle = actionName + " · " + selected.label;
         sheetIcon = selected.icon || "";
       }
     }
-    options.forEach(option => sheet.push({ ...button(id + option.value, option.label, () => {
-      model.value = option.value;
-      nativeChoices.value = "";
-    }, true, option.description), icon: option.icon, selected: option.value === model.value }));
+    const searchable = id.startsWith("slot-");
+    if (searchable) sheet.push(row("choice-search",
+      nativeEdit("shortcut-filter", shortcutQuery, t("搜索操作")),
+      button("clear-shortcut-filter", t("清除"), () => { shortcutQuery.value = ""; }, !!shortcutQuery.value)));
+    const groups = browseChoices(options, searchable ? shortcutQuery.value : "", locale.value);
+    if (!groups.length) sheet.push(text("shortcut-empty", t("没有匹配的操作")));
+    groups.forEach((group, index) => {
+      if (group.label) sheet.push(heading("choice-group-" + index + "-heading", group.label));
+      group.options.forEach(option => sheet.push({ ...button(id + option.value, option.label, () => {
+        if (!enabled) return;
+        model.value = option.value;
+        nativeChoices.value = "";
+      }, enabled, option.description), icon: option.icon, selected: option.value === model.value }));
+    });
   };
 
-  const shortcuts = [
-    ["mute", t("静音")], ["magnifier", t("鼠标放大镜")], ["taskview", t("任务视图")],
-    ["notifications", t("通知中心")], ["previousapp", t("上一个应用")], ["nextapp", t("下一个应用")],
-    ["virtualleft", t("上一个桌面")], ["virtualright", t("下一个桌面")],
-  ];
-  const slots = [shortcutA, shortcutB, shortcutC];
+  const slots = shortcutModels;
   const icons = [shortcutIconA, shortcutIconB, shortcutIconC];
-  const iconNames = [t("星标"), t("闪电"), t("铃铛"), t("方格"), t("电脑"), t("指针"), t("音量"), t("搜索"), t("切换"), t("向左箭头"), t("向右箭头"), t("图层"), t("键盘"), t("快捷键"), t("麦克风图标"), t("游戏手柄"), t("设置图标"), t("活动"), t("爱心"), t("灯泡")];
+  const iconNames = shortcutIconNames.map(name => t(shortcutIconLabels[name]));
   const micLabel = microphoneLocked.value ? t("持续收音") : t("麦克风");
   const english = locale.value === "en";
   const mic = { kind: "mic", id: "mic", label: english ? (microphoneLocked.value ? "Mic on" : "Mic") : micLabel,
-    hint: microphoneLocked.value ? t("立即停止麦克风") : t("按住说话，上滑锁定"),
+    hint: microphoneLocked.value ? t("立即停止麦克风") : t("查看麦克风状态与操作"),
     enabled: (online.value && remote.permissions.value.microphone) || microphoneLocked.value } satisfies NativeControl;
   const microphone = nativeMic && (microphoneLocked.value || destination.value === "remote" && !panel.value) ? {
     expanded: destination.value === "remote" && !panel.value && nativeMic.expanded.value,
@@ -550,6 +621,7 @@ if (nativeUi) watchEffect(() => {
   nativeActions.set("mic", value => {
     if (typeof value === "boolean") nativeMic?.keyboard({ key: " ", preventDefault() {} } as KeyboardEvent, value);
     else if (microphoneLocked.value) nativeMic?.stop();
+    else openPanel("microphone");
   });
   if (microphoneLocked.value) nativeActions.set("mic-stop", () => nativeMic?.stop());
 
@@ -569,8 +641,8 @@ if (nativeUi) watchEffect(() => {
       { ...button("pad-side", swapLabel, () => { padOnRight.value = !padOnRight.value; }), icon: "side", iconOnly: directional }));
     if (directional) {
       controls.push({ kind: "dpad", id: "dpad", value: dialSize.value, enabled: canInput.value, children: [
-        key("dpad-up", t("上"), "up"), key("dpad-right", t("右"), "right"),
-        key("dpad-down", t("下"), "down"), key("dpad-left", t("左"), "left"),
+        direction("dpad-up", t("上"), "up"), direction("dpad-right", t("右"), "right"),
+        direction("dpad-down", t("下"), "down"), direction("dpad-left", t("左"), "left"),
         key("dpad-center", t("确认"), "enter"),
       ] });
     } else {
@@ -593,7 +665,31 @@ if (nativeUi) watchEffect(() => {
       { ...mic, iconOnly: directional },
       { ...button("more", t("更多"), () => openPanel("more"), canInput.value), iconOnly: directional }));
   } else if (destination.value === "files") {
-
+    const incoming = sharedSelection.selection.value;
+    if (incoming.files.length || incoming.message) {
+      const entries: NativeControl[] = [row("share-heading", heading("share-title", t("待发送 · {0}", incoming.files.length)),
+        button("share-clear", t("清空"), sharedSelection.clear))];
+      for (const file of incoming.files) {
+        const name = file.name || t("文件");
+        const detail = file.pending ? t("正在读取文件…") : file.error || formatBytes(file.size);
+        entries.push(row("share-file-" + file.id,
+          { kind: "column", id: "share-copy-" + file.id, children: [
+            { ...button("share-name-" + file.id, name, () => { sharedFileDetail.value = file; openPanel("shared-file"); }), kind: "text" },
+            text("share-info-" + file.id, detail)] },
+          ...(file.error && !file.pending ? [{ ...button("share-retry-" + file.id, t("重新读取"), () => sharedSelection.retry(file), sharedSelection.canRetry(file)),
+            icon: "refresh", iconOnly: true, status: t("重新读取 {0}", name) }] : []),
+          { ...button("share-remove-" + file.id, t("移除 {0}", name), () => sharedSelection.remove(file)), icon: "close", iconOnly: true }));
+      }
+      if (incoming.message) entries.push(text("share-message", displayMessage(incoming.message)));
+      if (incoming.files.length) {
+        if (!canFiles.value) entries.push(text("share-hint", t("连接电脑并获得文件权限后，再确认发送。")));
+        else if (transferBusy.value) entries.push(text("share-hint", t("当前传输结束后，可发送这些文件。")));
+        entries.push(button("share-send", t("发送到 {0}", android?.getComputerName?.() || t("Windows 电脑")), sharedSelection.send, sharedSelection.canSend.value),
+          button("share-computer", t("选择电脑"), () => android?.changeComputer()));
+      }
+      controls.push({ kind: "column", id: "share-card", children: entries });
+    }
+    if (folderReady.value) nativeActions.set("folder", () => openPanel("folder"));
     controls.push(heading("receive", t("Android 接收目录")), text("folder", androidFolder.value),
       button("pick-folder", t("选择目录"), () => android?.chooseReceiveFolder(), !transferBusy.value));
     if (transferBusy.value) {
@@ -606,9 +702,10 @@ if (nativeUi) watchEffect(() => {
         button("cancel-transfer", transferCancelling.value ? t("取消中…") : t("取消传输"), cancelTransfer, !transferCancelling.value),
       ] });
     }
-    controls.push(button("upload", t("发送文件到 Windows"), () => android?.chooseUploadFiles?.(),
-      canFiles.value && !transferBusy.value, t("单文件最大 2 GB")));
+    controls.push(button("upload", t("发送文件到 Windows"), chooseUploadFiles,
+      canStartTransfer.value, t("单文件最大 2 GB")));
     if (transferMessage.value && !transferBusy.value) controls.push(text("transfer", displayMessage(transferMessage.value)));
+    if (unfinishedDownloads.value.length) controls.push(button("unfinished", downloadRecoveryLabel(unfinishedDownloads.value), () => openPanel("unfinished"), !transferBusy.value));
     if (transferHistory.value.length) {
       controls.push({ ...button("history-toggle", t("最近传输"), () => { nativeHistoryOpen.value = !nativeHistoryOpen.value; }),
         icon: nativeHistoryOpen.value ? "up" : "down" });
@@ -618,15 +715,23 @@ if (nativeUi) watchEffect(() => {
     if (!canFiles.value) controls.push(text("files-status", t("连接电脑并获得文件权限后，即可开始传输。")));
     else controls.push(heading("shared", t("Windows 共享的文件")),
       button("reload", t("刷新"), loadFiles, canFiles.value && !transferBusy.value && !filesLoading.value));
+    if (canFiles.value && (sharedFiles.value.length || fileQuery.value)) {
+      controls.push(row("files-search", nativeEdit("file-filter", fileQuery, t("搜索文件名")),
+        button("clear-file-filter", t("清除"), () => { fileQuery.value = ""; }, !!fileQuery.value)));
+      choice("file-order", t("排序方式"), fileOrder, [
+        { value: "default", label: t("默认顺序") }, { value: "name", label: t("名称 A–Z") }, { value: "largest", label: t("大小 从大到小") },
+      ]);
+      if (sharedFiles.value.length && !visibleFiles.value.length) controls.push(text("files-no-match", t("没有匹配的文件")));
+    }
     if (canFiles.value && filesError.value) controls.push(text("files-status", displayMessage(filesError.value)),
       button("files-retry", filesLoading.value ? t("读取中…") : t("重试"), loadFiles, !transferBusy.value && !filesLoading.value));
     if (canFiles.value && !sharedFiles.value.length && (!filesError.value || filesLoading.value)) {
       controls.push({ kind: "text", id: "files-empty", icon: "folder", label: filesLoading.value ? t("正在读取共享文件…") : t("电脑文件会显示在这里"),
         detail: filesLoading.value ? t("请稍候。") : t("在电脑端选择要共享的文件，即可保存到手机。") });
     }
-    if (canFiles.value) sharedFiles.value.forEach(file => controls.push(row("file-" + file.id,
+    if (canFiles.value) visibleFiles.value.forEach(file => controls.push(row("file-" + file.id,
       { kind: "text", id: "file-name-" + file.id, label: file.name, detail: formatBytes(file.size) },
-      { ...button("save-" + file.id, t("保存"), () => downloadFile(file), folderReady.value && !transferBusy.value),
+      { ...button("save-" + file.id, t("保存"), () => downloadFile(file), folderReady.value && canStartTransfer.value),
         status: t("保存 {0}", file.name) })));
   } else if (destination.value === "keyboard") {
     nativeActions.set("send", () => void sendText());
@@ -646,31 +751,37 @@ if (nativeUi) watchEffect(() => {
       ...command("combo-" + value, "Ctrl+" + value.toUpperCase(), { type: "combo", modifiers: ["ctrl"], key: value }), status: label })) });
     controls.push({ kind: "column", id: "keyboard-shortcuts", children: shortcuts });
   } else if (destination.value === "windows") {
-    if (!windowError.value && canInput.value) controls.push(row("window-actions", text("window-actions-spacer", ""),
-      { ...button("window-refresh", windowLoading.value ? t("读取中…") : t("刷新"), () => void loadWindows(), canInput.value && !windowLoading.value && !windowSwitching.value), icon: "refresh", iconOnly: true },
+    nativeActions.set("window-interaction", setWindowInteracting);
+    if (canInput.value) controls.push(row("window-actions", text("window-actions-spacer", windowList.value.length
+      ? windowLoading.value ? t("正在刷新…") : !windowListReady.value ? t("请刷新后重试") : "" : ""),
+      { ...button("window-search", t(windowSearchShown.value ? "收起搜索" : "搜索"), toggleWindowSearch, !openingTaskView.value && !windowSwitching.value), icon: windowSearchShown.value ? "close" : "search", iconOnly: true },
+      { ...button("window-refresh", windowLoading.value ? t("读取中…") : t("刷新"), () => void loadWindows(true), canInput.value && !windowLoading.value && !windowSwitching.value), icon: "refresh", iconOnly: true },
       { ...button("taskview", t("任务视图"), () => void openWindowTaskView(), !openingTaskView.value && !windowSwitching.value), icon: "taskview", iconOnly: true },
     ));
+    if (canInput.value && windowSearchShown.value) controls.push(row("windows-search",
+      { ...nativeEdit("window-filter", windowQuery, t("搜索窗口")), enabled: !windowSwitching.value && !openingTaskView.value },
+      button("clear-window-filter", t("清除"), () => { windowQuery.value = ""; }, !!windowQuery.value && !windowSwitching.value && !openingTaskView.value)));
     if (!canInput.value) {
       controls.push(text("windows-offline", t("连接电脑并获得遥控权限后，可以切换窗口。")));
     } else {
-      if (windowError.value) {
+      if (windowError.value && !windowList.value.length) {
         const unsupported = windowError.value.includes("窗口枚举不可用");
         controls.push(text("windows-error", unsupported ? t("这台电脑暂时无法提供窗口列表") : displayMessage(windowError.value)),
-          row("window-recovery", ...(windowList.value.length ? [] : [button("window-retry", t("重试"), () => void loadWindows(), !windowLoading.value)]),
+          row("window-recovery", ...(windowList.value.length ? [] : [button("window-retry", t("重试"), () => void loadWindows(true), !windowLoading.value)]),
             button("open-taskview", t("打开任务视图"), () => void openWindowTaskView(), !openingTaskView.value && !windowSwitching.value)));
       }
-      else if (windowNotice.value) controls.push(text("windows-notice", windowNotice.value));
       if (windowLoading.value && !windowList.value.length) controls.push(text("windows-loading", t("正在读取窗口列表…")));
       if (!windowLoading.value && !windowList.value.length && !windowError.value) controls.push(text("windows-empty", t("电脑上没有可切换的窗口")));
-      windowList.value.forEach(entry => {
+      if (windowListReady.value && windowList.value.length && !visibleWindows.value.length) controls.push(text("windows-no-match", t("没有匹配的窗口")));
+      visibleWindows.value.forEach(entry => {
         const id = "window-" + entry.hwnd;
         nativeActions.set(id, () => void switchWindow(entry));
         controls.push({
           kind: "window", id, label: entry.title,
-          detail: entry.app,
+          detail: windowSwitching.value === entry.hwnd ? t("正在切换…")
+            : [entry.app, entry.minimized ? t("已最小化") : ""].filter(Boolean).join(" · "),
           icon: entry.icon ?? "monitor",
-          status: windowSwitching.value === entry.hwnd ? t("正在切换…") : entry.minimized ? t("已最小化") : "",
-          enabled: canInput.value && !windowSwitching.value && !openingTaskView.value,
+          enabled: canInput.value && windowListReady.value && !windowSwitching.value && !openingTaskView.value,
         });
       });
     }
@@ -694,16 +805,30 @@ if (nativeUi) watchEffect(() => {
       { value: "follow", label: t("与手指方向一致") },
       { value: "opposite", label: t("与手指方向相反") },
     ]);
-    controls.push(toggle("haptics", t("触觉反馈"), haptics, t("操作成功后轻触反馈")), heading("display", t("显示")));
+    controls.push(toggle("hardware-volume", t("音量键控制电脑"), hardwareVolume, t("仅在已连接的遥控页生效，按住可连续调节")),
+      toggle("haptics", t("触觉反馈"), haptics, t("操作成功后轻触反馈")), heading("display", t("显示")));
     choice("language", t("语言"), languagePreference, languageOptions.value);
     choice("theme", t("外观"), theme, [{ value: "system", label: t("跟随系统") }, { value: "light", label: t("浅色") }, { value: "dark", label: t("深色") }]);
     controls.push(toggle("awake", t("保持屏幕常亮"), keepAwake, t("仅在前台连接电脑时生效")),
-      toggle("alive", t("应用保活"), keepAlive, t("连接电脑时在后台保持运行，并显示常驻通知")),
-      button("magnify", t("鼠标放大镜"), toggleMagnifier, canInput.value && !lensPending.value, magnifier.value ? t("已开启") : t("已关闭")),
-      heading("shortcuts", t("快捷操作")));
+      toggle("alive", t("应用保活"), keepAlive, keepAliveFailed.value ? t("后台服务未能启动，请检查系统的后台运行限制")
+        : backgroundProtocolUnsupported.value ? t("请同时更新手机和电脑端，以使用后台连接") : t("连接电脑时在后台保持运行，并显示常驻通知")));
+    if (keepAlive.value && android?.openBackgroundSettings && (backgroundBatteryRestricted.value || keepAliveFailed.value))
+      controls.push(button("background-settings", t("后台运行设置"), () => android.openBackgroundSettings?.(), true, t("允许羽连在息屏后继续连接电脑")));
+    controls.push(button("magnify", t("鼠标放大镜"), toggleMagnifier, canInput.value && !lensPending.value, magnifier.value ? t("已开启") : t("已关闭")),
+      heading("microphone-heading", t("手机麦克风")));
+    choice("microphone-mode", t("收音模式"), microphoneMode, [
+      { value: "standard", label: t("标准收音"), description: t("在电脑端手动调节麦克风增益") },
+      { value: "voice", label: t("语音增强"), description: t("设备支持时自动调节音量并降低噪声") },
+    ], !microphoneActive.value);
+    if (microphoneActive.value) controls.push(text("microphone-mode-help", t("停止收音后可更改收音模式")));
+    controls.push({ ...button("microphone-status", t("麦克风状态与帮助"), () => openPanel("microphone"), true,
+      nativeMic?.lastIssue.value ? t("查看最近提示") : t("查看声音通路和配置")), icon: "mic" });
+    controls.push(heading("shortcuts", t("快捷操作")));
+    choice("shortcut-preset", t("快捷操作预设"), shortcutPreset, presetOptions());
+    controls.push({ ...button("shortcut-plans", t("快捷方案"), openShortcutPlans, true, plans.currentName.value || t("保存和切换三键组合")), icon: "layers" });
     slots.forEach((slot, i) => {
       choice("slot-" + i, [t("快捷操作一"), t("快捷操作二"), t("快捷操作三")][i], slot,
-        shortcuts.filter(([value]) => value === slot.value || !slots.some(other => other.value === value)).map(([value, label]) => ({ value, label })));
+        shortcutOptions(slot.value).filter(item => item.value === slot.value || !slots.some(other => other.value === item.value)));
       choice("icon-" + i, [t("图标一"), t("图标二"), t("图标三")][i], icons[i],
         shortcutIconNames.map((value, index) => ({ value, label: iconNames[index], icon: value })));
     });
@@ -712,8 +837,125 @@ if (nativeUi) watchEffect(() => {
     controls.push({ ...text("settings-footnote", t("羽连 PlumeLink")), detail: t("让控制触手可及") });
   }
 
-  if (panel.value === "pair") {
-    sheet.push(heading("pair-name", android?.getComputerName?.() || t("Windows 电脑")), text("address", connectionAddress),
+  if (panel.value === "shortcut-plans") {
+    const stage = plans.stage.value;
+    const chosen = plans.plan.value;
+    const preview = (values: ReturnType<typeof currentShortcuts>) => values.forEach((slot, index) => sheet.push({
+      ...text("plan-preview-" + index, shortcutLabel(slot.action)), detail: [t("快捷操作一"), t("快捷操作二"), t("快捷操作三")][index],
+      kind: "window", icon: slot.icon, enabled: false,
+    }));
+    if (stage !== "list") sheetActions.push({ ...button("plan-back", t("返回"), () => plans.back()), icon: "left", iconOnly: true });
+    if (stage === "list") {
+      sheet.push({ ...heading("plans-builtins", t("内置方案")), tone: "neutral" });
+      shortcutPresets.forEach(preset => {
+        const value = builtinPlan("builtin:" + preset.value)!;
+        sheet.push({ ...button("plan-" + preset.value, t(preset.label), () => plans.select(value.id), true,
+          value.shortcuts.map(slot => shortcutLabel(slot.action)).join(" · ")), icon: value.shortcuts[1].icon,
+          kind: "action-row", selected: matchingSlots(value.shortcuts, currentShortcuts()) });
+      });
+      sheet.push({ ...heading("plans-saved", t("已保存的方案")), tone: "neutral" });
+      if (!shortcutPlans.value.length) sheet.push({ ...text("plans-empty", t("将当前三个快捷操作和图标保存为方案，方便下次切换。")), tone: "neutral" });
+      shortcutPlans.value.forEach(saved => sheet.push({ ...button("plan-" + saved.id, saved.name, () => plans.select(saved.id), true,
+        saved.shortcuts.map(slot => shortcutLabel(slot.action)).join(" · ")), icon: saved.shortcuts[1].icon,
+        kind: "action-row", selected: matchingSlots(saved.shortcuts, currentShortcuts()) }));
+      sheet.push({ ...button("plan-create", t("保存当前组合"), () => plans.saveCurrent(), shortcutPlans.value.length < maxShortcutPlans), kind: "action-row", disclosure: false, icon: "star" });
+      if (shortcutPlans.value.length >= maxShortcutPlans) sheet.push(text("plans-limit", t("最多保存 8 个方案，请先删除不需要的方案")));
+    } else if (stage === "save" || stage === "rename") {
+      sheetTitle = stage === "save" ? t("保存当前组合") : t("重命名方案");
+      sheet.push(nativeEdit("plan-name", plans.name, t("方案名称")));
+      preview(stage === "save" ? plans.captured.value : chosen?.shortcuts || []);
+      sheet.push(button("plan-save", t("保存"), () => plans.commit()));
+    } else if (chosen) {
+      sheetTitle = chosen.name;
+      preview(chosen.shortcuts);
+      if (stage === "delete") {
+        sheet.push(text("plan-delete-hint", t("删除方案不会改变正在使用的三个快捷操作。")),
+          button("plan-delete-confirm", t("删除方案"), () => plans.remove()), button("plan-delete-cancel", t("取消"), () => plans.back()));
+      } else {
+        sheet.push(button("plan-apply", t("应用方案"), () => { if (plans.apply()) leaveShortcutPlans(); }));
+        if (!chosen.builtin) sheet.push(row("plan-manage", button("plan-rename", t("重命名方案"), () => plans.rename()), button("plan-delete", t("删除方案"), () => plans.requestDelete())));
+      }
+    }
+    if (plans.error.value) sheet.push({ ...text("plan-error", displayMessage(plans.error.value)), kind: "notice", tone: "error" });
+  } else if (panel.value === "microphone") {
+    const value = online.value ? microphoneStatus.data.value : undefined;
+    const recentIssue = nativeMic?.lastIssue.value || "";
+    const computerIssue = microphoneStatus.error.value ? "" : value?.status.error || "";
+    const issue = recentIssue || computerIssue;
+    const warning = nativeMic?.warning.value || "";
+    const allowed = remote.permissions.value.microphone && !microphoneStatus.denied.value;
+    const guidance = microphoneStatus.error.value && online.value && allowed
+      ? { title: t("状态暂时不可用"), help: t("请刷新状态，或在电脑端的「偏好设置 → 手机麦克风」检查。") }
+      : microphoneGuidance(online.value, allowed, value, nativeMic?.phase.value || "idle", issue, warning, nativeMic?.permissionGranted.value !== false);
+    sheetActions.push({ ...button("microphone-refresh", microphoneStatus.manualRefreshing.value ? t("读取中…") : t("刷新状态"), () => { void microphoneStatus.refresh(); }, online.value && remote.permissions.value.microphone && !microphoneStatus.loading.value && !microphoneStatus.manualRefreshing.value), icon: "refresh", iconOnly: true });
+    sheet.push(heading("microphone-summary", guidance.title));
+    if (microphoneStatus.manualRefreshing.value) sheet.push(text("microphone-refreshing", t("正在读取麦克风状态…")));
+    if (recentIssue || warning) sheet.push(text("microphone-issue", displayMessage(recentIssue || warning)));
+    if (computerIssue && computerIssue !== recentIssue) sheet.push(text("microphone-computer-error", t("电脑提示：{0}", displayMessage(computerIssue))));
+    if (microphoneStatus.error.value) sheet.push({ kind: "notice", id: "microphone-read-error", tone: "error", label: displayMessage(microphoneStatus.error.value) });
+    if (guidance.help) sheet.push(text("microphone-guidance", guidance.help));
+    sheet.push(heading("microphone-phone-heading", t("手机收音")), text("microphone-phone", nativeMic?.recording.value
+      ? t("{0} · 正在收音", nativeMic.duration.value) : nativeMic?.phase.value === "reconnecting" ? t("正在重连…")
+        : nativeMic?.phase.value === "connecting" ? t("正在连接电脑…") : t("未在收音")));
+    if (value?.allowed && !microphoneStatus.error.value) {
+      sheet.push(heading("microphone-route-heading", t("声音去向")), text("microphone-output", value.configured ? value.output || t("已在电脑端选择音频设备") : t("未启用")));
+      if (value.gainDb !== undefined) sheet.push(text("microphone-gain", t("电脑麦克风增益：+{0} dB", value.gainDb)));
+      if (value.owned === true) {
+        sheet.push({ ...button("microphone-details", microphoneDetails.value ? t("收起详细状态") : t("查看详细状态"), () => { microphoneDetails.value = !microphoneDetails.value; }),
+          icon: microphoneDetails.value ? "down" : "next" });
+        if (microphoneDetails.value) sheet.push(text("microphone-received", t("已接收：{0} 帧", value.status.receivedFrames)),
+          text("microphone-buffer", t("播放缓冲：{0} ms", Math.round(value.status.queuedMs))),
+          text("microphone-jitter", t("网络抖动：{0} ms", Math.round(value.status.jitterMs))),
+          text("microphone-gaps", t("播放欠载：{0} 次 · 丢弃：{1} 帧", value.status.underruns, value.status.droppedFrames)));
+      }
+    }
+    if (nativeMic?.lastIssue.value) sheet.push(button("microphone-dismiss-issue", t("清除最近提示"), nativeMic.dismissIssue));
+    if (microphoneActive.value) sheetFooter.push(button("microphone-stop", t("立即停止麦克风"), () => nativeMic?.stop()));
+    else if (microphoneRecoveryAllowed.value) sheetFooter.push(button("microphone-restart", t("重新开启持续收音"), restartMicrophone,
+      !microphoneStatus.loading.value && !microphoneStatus.manualRefreshing.value));
+    else if (microphoneStartAllowed.value) sheetFooter.push(button("microphone-start", t("开启持续收音"), startMicrophone,
+      !microphoneStatus.loading.value && !microphoneStatus.manualRefreshing.value));
+    sheet.push(button("microphone-back", t("返回遥控"), () => { closePanel(); navigate("remote"); }));
+  } else if (panel.value === "shared-file" && sharedFileDetail.value) {
+    const file = sharedFileDetail.value;
+    sheetTitle = t("文件");
+    sheet.push(text("share-full-name", file.name || t("文件")),
+      text("share-full-size", file.pending ? t("正在读取文件…") : file.error || formatBytes(file.size)));
+    if (sharedSelection.selection.value.message) sheet.push(text("share-read-message", displayMessage(sharedSelection.selection.value.message)));
+    if (file.error && !file.pending) sheetFooter.push(button("share-file-retry", t("重新读取"), () => sharedSelection.retry(file), sharedSelection.canRetry(file)));
+  } else if (panel.value === "unfinished") {
+    if (unfinishedDownloads.value.some(file => file.pendingCommit)) sheetTitle = downloadRecoveryLabel(unfinishedDownloads.value);
+    sheetActions.push({ ...button("unfinished-refresh", t("刷新"), () => android?.syncSession?.(), !transferBusy.value && !recoveryBusy.value), icon: "refresh", iconOnly: true });
+    sheet.push(text("unfinished-help", unfinishedDownloads.value.some(file => file.pendingCommit)
+      ? t("请先核对接收目录中的文件，再选择保留或删除。") : t("请核对文件后选择保留或删除。")));
+    if (!unfinishedDownloads.value.length) sheet.push(text("unfinished-empty", t("没有未完成的文件")));
+    if (recoveryMessage.value) sheet.push({ ...text("unfinished-error", displayMessage(recoveryMessage.value)), kind: "notice", tone: "error" });
+    unfinishedDownloads.value.forEach(file => {
+      const confirm = confirmUnfinished.value?.id === file.id && confirmUnfinished.value.version === file.version;
+      const enabled = !transferBusy.value && !recoveryBusy.value;
+      const expanded = confirm || expandedUnfinished.value?.id === file.id && expandedUnfinished.value.version === file.version;
+      const actions = confirm ? [
+        button(recoveryActionId("confirm-delete", file), t("确认删除"), () => { resolveUnfinishedDownload(file, false); confirmUnfinished.value = undefined; }, enabled && file.available),
+        button(recoveryActionId("cancel-delete", file), t("取消"), () => { confirmUnfinished.value = undefined; }, enabled),
+      ] : [
+        button(recoveryActionId("keep", file), t("保留文件"), () => { resolveUnfinishedDownload(file, true); }, enabled),
+        button(recoveryActionId("delete", file), t("删除"), () => { confirmUnfinished.value = { id: file.id, version: file.version }; }, enabled && file.available),
+      ];
+      sheet.push({ kind: "column", id: "unfinished-" + file.id, children: [
+        { ...text("unfinished-name-" + file.id, file.name), maxLines: expanded ? undefined : 2 },
+        text("unfinished-size-" + file.id, downloadRecoveryStatus(file)),
+        ...(expanded && file.folder ? [text("unfinished-folder-" + file.id, t("位置：{0}", file.folder))] : []),
+        ...(!confirm ? [button(recoveryActionId(expanded ? "collapse" : "expand", file), expanded ? t("收起详情") : t("查看详情"), () => {
+          expandedUnfinished.value = expanded ? undefined : { id: file.id, version: file.version };
+        })] : []),
+        row("unfinished-actions-" + file.id, ...actions),
+      ] });
+    });
+  } else if (panel.value === "folder") {
+    sheetIcon = "folder";
+    sheet.push(text("folder-path", androidFolder.value));
+  } else if (panel.value === "pair") {
+    sheet.push(heading("pair-name", android?.getComputerName?.() || t("Windows 电脑")), text("address", connectionAddress.value),
       button("scan", t("扫描电脑二维码"), () => android?.scanPairingCode?.(), !pairing.value),
       text("pair-instructions", t("输入电脑上显示的 6 位配对码")), nativeEdit("code", code, t("6 位配对码")),
       text("pair-help", displayMessage(message.value)),
@@ -730,10 +972,27 @@ if (nativeUi) watchEffect(() => {
     if (!online.value) sheet.push(text("draft-offline", connectionLabel.value + t("，草稿已保留。")));
     if (textFeedback.value) sheet.push(text("text-feedback", displayMessage(textFeedback.value)));
     sheet.push(button("send", sending.value ? t("发送中…") : t("发送文字"), sendText, canText.value && !sending.value && !!input.value));
+  } else if (panel.value === "applications") {
+    sheetActions.push({ ...button("applications-refresh", t("刷新"), refreshApplications, canInput.value && !applicationsLoading.value && !applicationPending.value), icon: "refresh", iconOnly: true });
+    if (applicationSearchShown.value) sheet.push(row("applications-search",
+      { ...nativeEdit("application-filter", applicationQuery, t("搜索应用或文件夹")), enabled: canInput.value },
+      button("clear-application-filter", t("清除"), () => { applicationQuery.value = ""; }, canInput.value && !!applicationQuery.value)));
+    if (!canInput.value) sheet.push(text("applications-status", t("连接电脑并获得遥控权限后使用")));
+    else if (applicationsLoading.value) sheet.push(text("applications-status", t("读取中…")));
+    else if (!applications.value.length && !applicationsError.value) sheet.push(text("applications-empty", t("请先在电脑端的偏好设置中添加应用或文件夹")));
+    if (applicationActionError.value || applicationsError.value) sheet.push({ ...text("applications-error", displayMessage(applicationActionError.value || applicationsError.value)), kind: "notice", tone: "error" });
+    if (applicationsNotice.value) sheet.push({ ...text("applications-notice", applicationsNotice.value), kind: "notice", tone: "success" });
+    if (applicationsReady.value && applications.value.length && !visibleApplications.value.length) sheet.push(text("applications-no-match", t("没有匹配的快捷入口")));
+    visibleApplications.value.forEach(entry => sheet.push({ ...button("launch-" + entry.id, entry.name, () => launchApplication(entry), canInput.value && applicationsReady.value && !applicationPending.value && entry.available !== false,
+      applicationPending.value === entry.id ? applicationPendingDetail.value : entry.available === false ? unavailableApplication(entry) : undefined), kind: "window", icon: entry.icon || (entry.kind === "folder" ? "folder" : undefined) }));
   } else if (panel.value === "more") {
     sheet.push(row("more-keys", key("esc", "Esc", "escape"), command("desktop", t("显示桌面"), { type: "desktop" }), key("backspace", t("删除"), "backspace")),
       row("more-actions", command("scroll-up", t("向上滚动"), { type: "scroll", dy: -120 }), command("scroll-down", t("向下滚动"), { type: "scroll", dy: 120 }), button("windows", t("切换窗口"), () => navigate("windows"), canInput.value)),
-      row("more-slots", ...slots.map((slot, i) => ({ ...button("run-" + i, shortcuts.find(([value]) => slot.value === value)?.[1] || "", () => runShortcut(slot.value), canInput.value), icon: icons[i].value }))));
+      row("more-slots", ...slots.map((slot, i) => ({ ...button("run-" + i, shortcutLabel(slot.value), () => runShortcut(slot.value), canInput.value), icon: icons[i].value }))));
+    sheet.push({ ...button("shortcut-plans-more", t("快捷方案"), openShortcutPlans, true,
+      plans.currentName.value || presetOptions().find(item => item.value === shortcutPreset.value)?.label), kind: "action-row", groupStart: true, icon: "layers" });
+    sheet.push({ ...button("microphone-status-more", t("麦克风状态与帮助"), () => openPanel("microphone")), kind: "action-row", icon: "mic" });
+    if (feedback.value) sheet.push(text("more-feedback", feedback.value));
   } else if (panel.value === "windows") {
     sheet.push(text("switch-help", switchHelp.value),
       row("window-cycle", button("window-prev", t("上一个"), () => cycle("previous"), canInput.value), button("window-next", t("下一个"), () => cycle("next"), canInput.value)),
@@ -748,20 +1007,25 @@ if (nativeUi) watchEffect(() => {
   } else if (panel.value === "connection") {
     sheet.push({ kind: "column", id: "connection-hero", children: [
       { kind: "heading", id: "pc-name", label: android?.getComputerName?.() || t("Windows 电脑"), icon: "monitor" },
-      text("pc-status", displayMessage(message.value)), text("address", connectionAddress),
-    ] }, { kind: "column", id: "connection-metrics", children: [
+      text("pc-status", displayMessage(message.value)), text("address", connectionAddress.value),
+    ] }, ...(!online.value && !remote.usbExpired.value && !connectionRecovery.available.value ? [button("reconnect", status.value === "unpaired" ? t("输入配对码") : t("重新连接"), () => {
+      if (status.value === "unpaired") openPanel("pair");
+      else remote.resume();
+    })] : []));
+    if (connectionRecovery.available.value) {
+      sheet.push({ ...button("connection-find", connectionRecovery.busy.value ? t("正在查找这台电脑…") : t("查找并重新连接"),
+        connectionRecovery.recover, !connectionRecovery.busy.value), icon: "refresh" });
+      if (connectionRecovery.error.value) sheet.push(text("connection-find-error", displayMessage(connectionRecovery.error.value)));
+    }
+    sheet.push({ kind: "column", id: "connection-metrics", children: [
       row("quality-row", { kind: "text", id: "quality", label: t("网络质量"), detail: remote.qualityLabel.value },
         text("connection-latency", remote.latency.value === null ? "—" : remote.latency.value + " ms")),
       { kind: "text", id: "permission", label: t("控制权限"),
         detail: !online.value ? t("等待连接") : (hasControl.value ? t("可以控制") : t("当前由{0}主控", remote.primaryName.value || t("另一台设备"))) + (remote.adminGranted.value ? t(" · 管理员控制已开启") : "") },
     ] },
-      ...(!online.value ? [button("reconnect", status.value === "unpaired" ? t("输入配对码") : t("重新连接"), () => {
-        if (status.value === "unpaired") openPanel("pair");
-        else remote.resume();
-      })] : []),
-      button("change", t("管理与切换电脑"), () => android?.changeComputer()),
       { ...button("diagnostics", t("连接详情"), () => { nativeDiagnosticsOpen.value = !nativeDiagnosticsOpen.value; }),
         icon: nativeDiagnosticsOpen.value ? "down" : "next" });
+    sheetFooter.push(button("change", t("管理与切换电脑"), () => android?.changeComputer()));
     if (nativeDiagnosticsOpen.value) {
       const permission = (allowed: boolean) => allowed ? t("允许") : t("已关闭");
       sheet.push(text("transport", t("QFastTransmission · 发送间隔") + " " + remote.transportStats.value.intervalMs + " " + t("ms · 电脑排队") + " " + remote.transportStats.value.queueMs + " ms"),
@@ -771,27 +1035,54 @@ if (nativeUi) watchEffect(() => {
     sheet.push(heading("one", t("一根手指")), text("one-detail", t("滑动移动指针，轻点单击，连续轻点双击。按住片刻后移动可拖拽，松手结束。")),
       heading("two", t("两根手指")), text("two-detail", t("上下或左右滑动滚动页面，轻点右键，捏合或张开缩放。")),
       heading("shortcuts-help", t("更多快捷操作")), text("shortcuts-detail", t("在设置中选择三个快捷操作，再到遥控页的“更多”中使用。")),
+      heading("direction-help", t("方向遥控")), text("direction-detail", t("按住方向键连续移动，松手或移出按键区域即停止；确认键只执行一次。")),
       heading("input-help", t("输入与播放")), text("input-detail", t("先在电脑上选中输入位置，再发送文字。播放按钮发送空格键，前后按钮发送方向键，效果取决于当前应用。")));
   }
-  if (sheetTitle && feedback.value) sheet.push(text("sheet-feedback", displayMessage(feedback.value)));
-  nativeActions.set("dismiss", () => { if (nativeChoices.value) nativeChoices.value = ""; else closePanel(); });
+  if (sheetTitle && feedback.value) {
+    const message = displayMessage(feedback.value);
+    const showsMessage = (items: NativeControl[]): boolean => items.some(item => item.label?.includes(message)
+      || item.detail?.includes(message) || item.children && showsMessage(item.children));
+    if (!showsMessage(sheet)) sheet.push(text("sheet-feedback", message));
+  }
+  if (customEditing.value !== null) {
+    sheet.length = 0; sheetActions.length = 0; sheetFooter.length = 0;
+    sheetTitle = t("自定义按键"); sheetIcon = "keyboard";
+    sheetActions.push(button("custom-key-save", t("保存"), saveCustomShortcut));
+    sheet.push(text("custom-key-preview", chordLabel(customDraft.value)),
+      { kind: "strip", id: "custom-modifiers", children: keyboardModifiers.map(modifier => ({ ...button("custom-mod-" + modifier, modifier === "win" ? "Win" : modifier[0].toUpperCase() + modifier.slice(1), () => toggleCustomModifier(modifier)), selected: customDraft.value.modifiers.includes(modifier) })) },
+      { kind: "strip", id: "custom-key-groups", children: keyGroups.map(group => ({ ...button("custom-group-" + group.value, t(group.label), () => { customGroup.value = group.value; }), selected: customGroup.value === group.value })) });
+    const keys = keyGroups.find(group => group.value === customGroup.value)?.keys || [];
+    for (let index = 0; index < keys.length; index += 4) {
+      const cells: NativeControl[] = keys.slice(index, index + 4).map(key => ({ ...button("custom-key-" + key, keyLabel(key), () => { customDraft.value.key = key; customError.value = ""; }), selected: customDraft.value.key === key }));
+      while (cells.length < 4) cells.push(text("custom-empty-" + index + "-" + cells.length, ""));
+      sheet.push(row("custom-key-row-" + index, ...cells));
+    }
+    if (customError.value) sheet.push({ ...text("custom-key-error", customError.value), kind: "notice", tone: "error" });
+  }
+  nativeActions.set("dismiss", () => { if (customEditing.value !== null) closeCustomShortcut(); else if (nativeChoices.value) nativeChoices.value = ""; else closePanel(); });
+  nativeActions.set("dismiss-feedback", dismissFeedback);
+  const dismissAction = bindSheetActions(nativeActions, [...sheet, ...sheetActions, ...sheetFooter], nativeSheetRevision.value);
   const keepDialPosition = immersive.value && destination.value === "remote" && controlMode.value === "dpad";
   const nav = ((immersive.value && !keepDialPosition) || destination.value === "keyboard" || destination.value === "windows") ? [] : ([
     ["remote", t("遥控")], ["files", t("文件")], ["settings", t("设置")],
   ] as const).map(([id, label]) => button("nav-" + id, label, () => navigate(id), destination.value !== id));
-  const connection = { ...button("connection-chip", connectionLabel.value, () => openPanel(status.value === "unpaired" ? "pair" : "connection")),
+  const connection = { ...button("connection-chip", connectionLabel.value, () => openPanel(status.value === "unpaired" && !remote.usbExpired.value ? "pair" : "connection")),
     status: online.value ? remote.quality.value : status.value,
     hint: remote.connectionBadgeLabel.value,
     detail: online.value && remote.latency.value !== null ? remote.latency.value + " ms" : "" };
+  const screenActions = bindScreenActions(nativeActions, [connection, ...controls, ...nav], nativeScreenRevision.value);
   android?.renderNativeUi?.(JSON.stringify({
-    destination: destination.value, side: padOnRight.value, title: screenTitle.value, sessionStatus: status.value,
+    destination: destination.value, side: padOnRight.value, title: screenTitle.value, sessionStatus: status.value, fileTransferAllowed: canFiles.value,
     subtitle: android?.getComputerName?.(), connection, controls, nav, keepDialPosition, feedback: displayMessage(feedback.value),
-    dark: darkAppearance.value, microphone,
-    sheetKey: nativeChoices.value || panel.value, sheetTitle, sheetIcon, sheet,
+    dark: darkAppearance.value, microphone, hardwareVolume: hardwareVolumeActive.value,
+    sheetKey: customEditing.value !== null ? "custom-key-editor" : nativeChoices.value || (panel.value === "shortcut-plans" ? "shortcut-plans-" + plans.stage.value : panel.value), sheetTitle, sheetIcon, sheetActions, sheetFooter, sheet,
+    dismissAction, screenActions,
   }));
 });
 
 onMounted(() => {
+  refreshKeepAliveState();
+  window.addEventListener("plumelink-keepalive", refreshKeepAliveState);
   window.addEventListener("plumelink-native-ui", nativeEvent);
   window.addEventListener("plumelink-native-pointer", nativePointer);
   (window as Window & { plumeLinkBack?: () => boolean }).plumeLinkBack = handleBack;
@@ -803,7 +1094,7 @@ onMounted(() => {
   } else {
     remote.resume();
   }
-  if (status.value === "unpaired") openPanel("pair");
+  if (status.value === "unpaired" && !remote.token()) openPanel("pair");
   document.addEventListener("visibilitychange", visibility);
   window.addEventListener("pagehide", pagehide);
   window.addEventListener("pageshow", pageshow);
@@ -811,9 +1102,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  windowPageGeneration++;
-  windowRequest?.abort();
-  windowRequest = undefined;
+  window.removeEventListener("plumelink-keepalive", refreshKeepAliveState);
   window.removeEventListener("plumelink-native-ui", nativeEvent);
   window.removeEventListener("plumelink-native-pointer", nativePointer);
   delete (window as Window & { plumeLinkBack?: () => boolean }).plumeLinkBack;
@@ -827,78 +1116,4 @@ onUnmounted(() => {
 });
 </script>
 
-<template>
-  <main v-if="!nativeUi" class="app-shell" :class="{ immersive }" @contextmenu.prevent>
-    <header class="app-bar">
-      <div><h1>{{ screenTitle }}</h1><span class="app-subtitle">{{ android?.getComputerName?.() || t('羽连') }}</span></div>
-      <button class="connection" :class="{ connected: online, [`quality-${remote.quality.value}`]: online }" :aria-label="connectionLabel" @click="connectionClick">
-        <span class="dot" :class="{ live: online }" aria-hidden="true"></span>
-        <span>{{ remote.connectionBadgeLabel.value }}</span>
-        <small v-if="online && remote.latency.value !== null">{{ remote.latency.value }} ms</small>
-        <ChevronRight aria-hidden="true" />
-      </button>
-    </header>
-    <div id="microphone-status" class="microphone-status-host"></div>
-    <div v-show="destination === 'remote' || microphoneLocked" class="session-tools">
-      <button v-if="destination === 'remote'" class="pad-side-toggle" @click="padOnRight = !padOnRight">
-        <ArrowLeftRight aria-hidden="true" /><span>{{ padOnRight ? t('触控板移到左侧') : t('触控板移到右侧') }}</span>
-      </button>
-      <button v-if="destination === 'remote'" class="focus-toggle" :aria-label="focusMode ? t('显示导航') : t('隐藏导航')" :aria-pressed="focusMode" @click="focusMode = !focusMode">
-        <Minimize2 v-if="focusMode" aria-hidden="true" /><Maximize2 v-else aria-hidden="true" /><span>{{ focusMode ? t('显示导航') : t('专注遥控') }}</span>
-      </button>
-    </div>
-    <div class="app-content">
-      <section v-show="destination === 'remote'" class="remote-view" :class="{ 'pad-on-right': padOnRight }" :aria-label="t('遥控')">
-        <div v-if="!online || !hasControl" class="inline-notice">
-          <span>{{ online ? t('当前由{0}主控', remote.primaryName.value || t('另一台设备')) : displayMessage(message) }}</span>
-          <button v-if="online" :disabled="controlRequestPending || !remote.permissions.value.input" @click="requestControl">{{ controlRequestPending ? t('等待电脑确认') : t('请求接管') }}</button>
-          <button v-else @click="connectionClick">{{ status === 'unpaired' ? t('配对') : t('重试') }}</button>
-        </div>
-        <TouchSurface
-          :enabled="canInput"
-          :unavailable-reason="!online ? t('等待连接') : !remote.permissions.value.input ? t('未获输入权限') : t('当前无主控权')"
-          :touching="touchpad.touching.value"
-          :dragging="touchpad.dragLocked.value"
-          @down="touchpad.down"
-          @move="touchpad.move"
-          @up="touchpad.up"
-          @cancel="cancelInteraction"
-          @lost="touchpad.captureLost"
-          @click="button => action({ type: 'click', button, count: 1 })"
-        />
-        <div class="media-controls">
-          <section class="volume-row" :aria-label="t('音量操作')">
-            <button :disabled="!canInput" :aria-label="t('音量减')" @click="action({ type: 'volume', action: 'down' })"><Volume1 aria-hidden="true" /></button>
-            <button :disabled="!canInput" :aria-label="t('静音')" @click="action({ type: 'volume', action: 'mute' })"><VolumeX aria-hidden="true" /></button>
-            <button :disabled="!canInput" :aria-label="t('音量加')" @click="action({ type: 'volume', action: 'up' })"><Volume2 aria-hidden="true" /></button>
-          </section>
-          <section class="play-row" :aria-label="t('播放快捷键')">
-            <button :disabled="!canInput" :aria-label="t('后退')" @click="action({ type: 'key', key: 'left' })"><ChevronLeft aria-hidden="true" /></button>
-            <button class="play-button accent" :disabled="!canInput" :aria-label="t('播放/暂停')" @click="action({ type: 'key', key: 'space' })"><Play aria-hidden="true" /></button>
-            <button :disabled="!canInput" :aria-label="t('前进')" @click="action({ type: 'key', key: 'right' })"><ChevronRight aria-hidden="true" /></button>
-          </section>
-        </div>
-        <div class="remote-tools" role="group" :aria-label="t('遥控工具')">
-          <button :disabled="!canInput" @click="action({ type: 'key', key: 'enter' })"><CornerDownLeft aria-hidden="true" /><span>{{ t('回车') }}</span></button>
-          <button :disabled="!canText" @click="openPanel('keyboard')"><Keyboard aria-hidden="true" /><span>{{ t('键盘') }}</span><i v-if="input" class="draft-dot" :aria-label="t('有未发送草稿')"></i></button>
-          <MicrophoneControl :enabled="(online && remote.permissions.value.microphone) || microphoneLocked" :allowed="(status !== 'unpaired' && remote.permissions.value.microphone) || microphoneLocked" :active-page="destination === 'remote' && !panel" @locked="microphoneLocked = $event" @active="microphoneActive = $event" @notice="notice" />
-          <button :disabled="!canInput" @click="openPanel('more')"><Ellipsis aria-hidden="true" /><span>{{ t('更多') }}</span></button>
-        </div>
-      </section>
-      <FilesScreen v-show="destination === 'files'" :native="!!android" :can-files="canFiles" :android-folder="androidFolder" :folder-ready="folderReady" :shared-files="sharedFiles" :files-loading="filesLoading" :files-error="filesError" :transfer-busy="transferBusy" :transfer-cancelling="transferCancelling" :transfer-progress="transferProgress" :transfer-message="transferMessage" :transfer-history="transferHistory" @folder="android?.chooseReceiveFolder()" @upload="uploadFiles" @refresh="loadFiles" @download="downloadFile" @cancel="cancelTransfer" @clear-history="clearTransferHistory" />
-      <SettingsScreen v-show="destination === 'settings'" :native="!!android" v-model:sensitivity="sensitivity" v-model:keep-awake="keepAwake" v-model:keep-alive="keepAlive" v-model:haptics="haptics" v-model:long-press-drag="longPressDrag" v-model:scroll-direction="scrollDirection" v-model:theme="theme" v-model:response-mode="responseMode" v-model:shortcut-a="shortcutA" v-model:shortcut-b="shortcutB" v-model:shortcut-c="shortcutC" v-model:shortcut-icon-a="shortcutIconA" v-model:shortcut-icon-b="shortcutIconB" v-model:shortcut-icon-c="shortcutIconC" :can-input="canInput" :can-power="canPower" :magnifier="magnifier" :lens-pending="lensPending" :connection-label="settingsConnectionLabel" @connection="openPanel('connection')" @magnify="toggleMagnifier" @help="openPanel('help')" @shutdown="openPanel('shutdown')" />
-    </div>
-    <AppNavigation v-show="!immersive" :active="destination" :transferring="transferBusy" @navigate="navigate" />
-    <div v-if="feedback && !panel" class="snackbar" role="status">{{ displayMessage(feedback) }}</div>
-  </main>
-  <BottomSheet v-if="!nativeUi" :open="panel !== null" :title="panel ? titles[panel] : ''" @close="closePanel">
-    <KeyboardSheet v-if="panel === 'keyboard'" ref="keyboardSheet" v-model:input="input" :can-input="canInput" :can-text="canText" :online="online" :sending="sending" :connection-label="connectionLabel" :text-feedback="textFeedback" @command="action" @submit="sendText" />
-    <MoreActionsSheet v-else-if="panel === 'more'" :can-input="canInput" :shortcut-a="shortcutA" :shortcut-b="shortcutB" :shortcut-c="shortcutC" :shortcut-icon-a="shortcutIconA" :shortcut-icon-b="shortcutIconB" :shortcut-icon-c="shortcutIconC" @command="action" @shortcut="runShortcut" @windows="panel = 'windows'" />
-    <WindowSwitchSheet v-else-if="panel === 'windows'" :can-input="canInput" :hint="switchHelp" @cycle="cycle" @finish="finishSwitch" />
-    <ShutdownSheet v-else-if="panel === 'shutdown'" :can-power="canPower" :shutdown-pending="shutdownPending" :shutdown-sent="shutdownSent" @shutdown="requestShutdown" @close="closePanel" />
-    <PairSheet v-else-if="panel === 'pair'" v-model:code="code" :computer-name="android?.getComputerName?.() || t('Windows 电脑')" :connection-address="connectionAddress" :has-scanner="!!android?.scanPairingCode" :pairing="pairing" :status="status" :message="message" @scan="android?.scanPairingCode?.()" @submit="pair" />
-    <ConnectionSheet v-else-if="panel === 'connection'" :computer-name="android?.getComputerName?.() || t('Windows 电脑')" :connection-address="connectionAddress" :message="message" :quality-label="remote.qualityLabel.value" :latency="remote.latency.value" :has-control="hasControl" :primary-name="remote.primaryName.value" :admin-granted="remote.adminGranted.value" :online="online" :status="status" :has-native="!!android" :transport-stats="remote.transportStats.value" :permissions="remote.permissions.value" @open-pair="panel = 'pair'" @resume="remote.resume()" @change-computer="android?.changeComputer()" @forget="remote.forget(); panel = 'pair'" />
-    <HelpSheet v-else-if="panel === 'help'" />
-    <p v-if="feedback" class="panel-feedback" role="status">{{ displayMessage(feedback) }}</p>
-  </BottomSheet>
-</template>
+<template></template>

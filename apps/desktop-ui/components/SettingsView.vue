@@ -7,7 +7,9 @@ import { displayMessage, locale, t, languageOptions, languagePreference } from "
 import { desktopTheme } from "../theme";
 import { DEFAULT_SERVICE_PORT } from "../bridge";
 import type { DesktopState } from "../../../shared/protocol";
+import ApplicationSettings from "./ApplicationSettings.vue";
 import MicrophoneSettings from "./MicrophoneSettings.vue";
+import UsbSettings from "./UsbSettings.vue";
 
 const headings = { "zh-CN": "简体中文", "zh-TW": "繁體中文", en: "English" };
 const policyText = computed(() => policy.replace(/\r/g, "").split(/^## /m)
@@ -27,6 +29,7 @@ watch(draftPort, () => { portError.value = ""; });
 const portNumber = computed(() => /^\d{1,5}$/.test(draftPort.value) ? Number(draftPort.value) : NaN);
 const validPort = computed(() => portNumber.value >= 1 && portNumber.value <= 65535);
 const portChanged = computed(() => portNumber.value !== props.state.port);
+const lanRunning = computed(() => props.state.lanRunning ?? props.state.running);
 async function applyPort() {
   if (props.busy || !validPort.value || !portChanged.value) return;
   portError.value = "";
@@ -65,11 +68,15 @@ const emit = defineEmits<{
     <div class="details-body preference-list">
       <div class="preference-row network-row">
         <label for="network">{{ t('局域网网卡') }}</label>
-        <select id="network" v-model="selected" :disabled="state.running || busy" :aria-describedby="state.running ? 'network-help' : undefined">
+        <div class="preference-field">
+        <select id="network" v-model="selected" :disabled="lanRunning || busy" :aria-describedby="lanRunning ? 'network-help' : undefined">
           <option value="" disabled>{{ t('请选择局域网网卡') }}</option>
           <option v-for="item in state.addresses" :key="item.address" :value="item.address">{{ item.name }} · {{ item.address }}{{ item.virtual ? t('（虚拟 / VPN）') : '' }}</option>
         </select>
-        <p v-if="state.running" id="network-help" class="hint">{{ t('更换网卡请先停止遥控，再选择并启动。') }}</p>
+        <p v-if="lanRunning" id="network-help" class="hint">{{ t('停止无线连接后可更换网卡，USB 连接不受影响。') }}</p>
+        <button v-if="lanRunning" type="button" :disabled="busy" @click="emit('action', 'wirelessstop')">{{ t('停止无线连接') }}</button>
+        <button v-else type="button" :disabled="busy || !selected" @click="emit('action', 'start')">{{ t('启动无线连接') }}</button>
+        </div>
       </div>
       <form class="preference-row port-row" @submit.prevent="applyPort">
         <label for="service-port">{{ t('服务端口') }}</label>
@@ -79,7 +86,7 @@ const emit = defineEmits<{
           <button type="submit" :disabled="busy || !validPort || !portChanged">{{ t('应用') }}</button>
         </div>
         <p v-if="portChanged" id="port-feedback" class="hint" role="status">
-          {{ !validPort ? t('请输入 1 到 65535 之间的整数。') : portError ? displayMessage(portError) : state.running ? t('应用后，手机需要重新连接新端口。') : t('下次启动服务时使用此端口。') }}
+          {{ !validPort ? t('请输入 1 到 65535 之间的整数。') : portError ? displayMessage(portError) : lanRunning ? t('应用后，手机需要重新连接新端口。') : t('下次启动服务时使用此端口。') }}
           {{ t('当前端口：{0}', state.port) }}
         </p>
         <button v-if="state.port !== DEFAULT_SERVICE_PORT && portNumber !== DEFAULT_SERVICE_PORT" type="button" class="text-button port-default" :disabled="busy" @click="draftPort = String(DEFAULT_SERVICE_PORT)">{{ t('恢复默认端口（{0}）', DEFAULT_SERVICE_PORT) }}</button>
@@ -93,6 +100,7 @@ const emit = defineEmits<{
       </div>
     </div>
   </details>
+  <UsbSettings />
   <details class="settings" open>
     <summary><span class="section-title"><SlidersHorizontal aria-hidden="true" />{{ t('遥控设置') }}</span><ChevronDown aria-hidden="true" /></summary>
     <div class="details-body preference-list">
@@ -105,6 +113,7 @@ const emit = defineEmits<{
           <option value="large">{{ t('大') }}</option>
         </select>
       </div>
+      <ApplicationSettings />
     </div>
   </details>
   <MicrophoneSettings :status="state.microphone" />

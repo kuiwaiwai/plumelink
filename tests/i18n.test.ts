@@ -29,4 +29,24 @@ describe("interface languages", () => {
     expect(displayMessage("无法读取所选文件：用户 {0}.txt")).toBe("Could not read selected file: 用户 {0}.txt");
     expect(displayMessage("driver-specific error")).toBe("driver-specific error");
   });
+  it("translates window-list timeouts when the interface language changes", () => {
+    languagePreference.value = "en";
+    const message = displayMessage("窗口列表超时");
+    expect(message).toBe("The window list timed out. Refresh to retry.");
+    languagePreference.value = "zh-TW";
+    expect(displayMessage(message)).toBe("讀取視窗清單逾時，請重新整理後重試。");
+    languagePreference.value = "zh-CN";
+    expect(displayMessage(message)).toBe("窗口列表超时");
+  });
+  it("updates stored failure details and their uncertainty warning when language changes", () => {
+    const reason = "此应用需要管理员权限，请在电脑端启动";
+    const warning = "结果未确认，请检查电脑；不会自动重发";
+    const saved = reason + "\n" + warning;
+    languagePreference.value = "en";
+    const englishMessage = displayMessage(saved);
+    expect(englishMessage).toBe(english[reason] + "\n" + english[warning]);
+    languagePreference.value = "zh-TW";
+    expect(displayMessage(englishMessage)).toBe(traditional[reason] + "\n" + traditional[warning]);
+    expect(displayMessage(reason + "\nprivate detail")).toBe(reason + "\nprivate detail");
+  });
 });

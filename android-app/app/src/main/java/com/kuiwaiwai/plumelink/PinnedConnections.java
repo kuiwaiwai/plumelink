@@ -8,6 +8,8 @@ import java.util.Locale;
 import javax.net.ssl.*;
 import okhttp3.ConnectionPool;
 import okhttp3.OkHttpClient;
+import okhttp3.HttpUrl;
+import okhttp3.Request;
 import java.util.concurrent.TimeUnit;
 
 /** Trust only the certificate and host approved for the selected computer. */
@@ -16,9 +18,17 @@ final class PinnedConnections {
     final SSLSocketFactory sockets;
     final X509TrustManager trust;
     final HostnameVerifier hostname;
+    private static final String USB_HEADER = "X-PlumeLink-USB";
+    private final HttpUrl usbBase;
+    private final String usbKey;
+    PinnedConnections(String host, String pin) throws Exception { this(host, pin, "", ""); }
     @android.annotation.SuppressLint("CustomX509TrustManager") // Self-signed LAN certificates are accepted only by exact user-approved SHA-256 pin and host.
-    PinnedConnections(String host, String pin) throws Exception {
+    PinnedConnections(String host, String pin, String base, String usbKey) throws Exception {
         if (pin == null || pin.isEmpty()) throw new Exception("尚未信任电脑证书");
+        HttpUrl parsed = HttpUrl.parse(base);
+        usbBase = parsed != null && "https".equals(parsed.scheme()) && "127.0.0.1".equals(parsed.host())
+            && host.equals(parsed.host()) && parsed.username().isEmpty() && parsed.password().isEmpty() ? parsed : null;
+        this.usbKey = usbBase != null && UsbAccess.validKey(usbKey) ? usbKey : "";
         trust = new X509TrustManager() {
             public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
             public void checkClientTrusted(X509Certificate[] chain, String type) throws java.security.cert.CertificateException { throw new java.security.cert.CertificateException("不接受客户端证书"); }
@@ -36,6 +46,15 @@ final class PinnedConnections {
             catch (Exception e) { return false; }
         };
     }
+    private boolean acceptsUsb(HttpUrl target) {
+        return usbBase != null && !usbKey.isEmpty() && "https".equals(target.scheme())
+            && usbBase.host().equals(target.host()) && usbBase.port() == target.port();
+    }
+    Request authorizeUsb(Request request) {
+        Request.Builder builder = request.newBuilder().removeHeader(USB_HEADER);
+        if (acceptsUsb(request.url())) builder.header(USB_HEADER, usbKey);
+        return builder.build();
+    }
     static String fingerprint(X509Certificate certificate) throws Exception {
         StringBuilder out = new StringBuilder();
         for (byte b : MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded())) {
@@ -47,17 +66,21 @@ final class PinnedConnections {
         HttpsURLConnection result = (HttpsURLConnection) new URL(url).openConnection();
         result.setSSLSocketFactory(sockets); result.setHostnameVerifier(hostname);
         result.setConnectTimeout(8000); result.setReadTimeout(15000); result.setInstanceFollowRedirects(false);
+        HttpUrl target = HttpUrl.parse(url);
+        if (target != null && acceptsUsb(target)) result.setRequestProperty(USB_HEADER, usbKey);
         if (!token.isEmpty()) result.setRequestProperty("Authorization", "Bearer " + token);
         result.setRequestProperty("Accept-Encoding", "identity");
         return result;
     }
     OkHttpClient audioClient() {
         return new OkHttpClient.Builder().sslSocketFactory(sockets, trust).hostnameVerifier(hostname)
+            .addInterceptor(chain -> chain.proceed(authorizeUsb(chain.request())))
             .connectTimeout(5, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).writeTimeout(2, TimeUnit.SECONDS)
             .pingInterval(1, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();
     }
     OkHttpClient transferClient() {
         return new OkHttpClient.Builder().sslSocketFactory(sockets, trust).hostnameVerifier(hostname)
+            .addInterceptor(chain -> chain.proceed(authorizeUsb(chain.request())))
             .connectionPool(TRANSFER_POOL).connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();

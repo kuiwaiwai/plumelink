@@ -3,7 +3,6 @@ package com.kuiwaiwai.plumelink;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -20,12 +19,12 @@ final class NativeMicrophoneUi {
     private final Context context;
     NativeMicrophoneUi(Context context) { this.context = context; }
     private int dp(float n) { return Math.round(n * context.getResources().getDisplayMetrics().density); }
-    private int accent(boolean dark) { return dark ? 0xffa5bdff : 0xff2868e8; }
-    private int soft(boolean dark) { return dark ? 0xff283b62 : 0xffe6edff; }
-    private int foreground(boolean dark) { return dark ? 0xffedf0f7 : 0xff1a202c; }
-    private int background(boolean dark) { return dark ? 0xff111318 : 0xfff5f6fa; }
-    private int onAccent(boolean dark) { return dark ? 0xff122448 : 0xffffffff; }
-    private int danger(boolean dark) { return dark ? 0xffffb1b6 : 0xffb73b45; }
+    private int accent(boolean dark) { return UiStyle.accent(dark); }
+    private int soft(boolean dark) { return UiStyle.accentSoft(dark); }
+    private int foreground(boolean dark) { return UiStyle.ink(dark); }
+    private int background(boolean dark) { return UiStyle.background(dark); }
+    private int onAccent(boolean dark) { return UiStyle.onAccent(dark); }
+    private int danger(boolean dark) { return UiStyle.danger(dark); }
     private GradientDrawable shape(int fill, int radius) {
         GradientDrawable draw = new GradientDrawable();
         draw.setCornerRadius(dp(radius));
@@ -41,8 +40,8 @@ final class NativeMicrophoneUi {
     private void setText(TextView view, String value) {
         if (!value.contentEquals(view.getText())) view.setText(value);
     }
-    private void icon(Canvas canvas, String name, int color, float x, float y, int size) {
-        Drawable glyph = NativeIcon.of(name, color, dp(size));
+    private void icon(Canvas canvas, NativeIcon.Cache cache, String name, int color, float x, float y, int size) {
+        Drawable glyph = cache.get(name, color, dp(size));
         if (glyph == null) return;
         canvas.save();
         canvas.translate(x - dp(size) / 2f, y - dp(size) / 2f);
@@ -56,18 +55,20 @@ final class NativeMicrophoneUi {
         brush.setStrokeWidth(dp(2.5f));
         brush.setStrokeCap(Paint.Cap.ROUND);
         brush.setColor(color);
-        canvas.drawArc(new RectF(x - r, y - r, x + r, y + r), -90, 3.6f * progress, false, brush);
+        canvas.drawArc(x - r, y - r, x + r, y + r, -90, 3.6f * progress, false, brush);
         brush.setStyle(Paint.Style.FILL);
     }
 
     final class Key extends TextView {
         private final Paint brush = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final NativeIcon.Cache glyph = new NativeIcon.Cache(), lockGlyph = new NativeIcon.Cache();
         private boolean locked, stopping, dark, recording, tablet, iconOnly;
         private int progress;
         private int idleIconColor;
         private int lastFill = Integer.MIN_VALUE;
 
         Key() { super(context); }
+        @Override public CharSequence getAccessibilityClassName() { return Button.class.getName(); }
         void update(JSONObject state, boolean night, boolean wideTablet, int idleIconColor, boolean iconOnly) {
             this.iconOnly = iconOnly;
             dark = night;
@@ -89,8 +90,8 @@ final class NativeMicrophoneUi {
             float x = getWidth() / 2f;
             float y = iconOnly ? getHeight() / 2f : getPaddingTop() - dp(5) - dp(22) / 2f;
             int color = stopping || locked || recording ? getCurrentTextColor() : idleIconColor;
-            icon(canvas, stopping ? "mic-off" : "mic", color, x, y, 22);
-            if (locked && !stopping) icon(canvas, "lock", color, x + dp(14), y - dp(10), 11);
+            icon(canvas, glyph, stopping ? "mic-off" : "mic", color, x, y, 22);
+            if (locked && !stopping) icon(canvas, lockGlyph, "lock", color, x + dp(14), y - dp(10), 11);
             ring(canvas, brush, x, y, 19, color, progress);
             super.onDraw(canvas);
             canvas.restore();
@@ -142,6 +143,7 @@ final class NativeMicrophoneUi {
             setGravity(Gravity.CENTER_VERTICAL);
             addView(mic, new LayoutParams(dp(14), dp(16)));
             elapsed.setSingleLine();
+            elapsed.setFontFeatureSettings("tnum");
             elapsed.setEllipsize(android.text.TextUtils.TruncateAt.END);
             elapsed.setPadding(dp(3), 0, dp(3), 0);
             addView(elapsed, new LayoutParams(-2, -2));
@@ -152,6 +154,14 @@ final class NativeMicrophoneUi {
         }
 
         View stopButton() { return stop; }
+
+        @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int available = MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED ? Integer.MAX_VALUE
+                : Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - getPaddingLeft() - getPaddingRight()
+                    - mic.getLayoutParams().width - meter.getLayoutParams().width);
+            if (elapsed.getMaxWidth() != available) elapsed.setMaxWidth(available);
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
 
         void update(JSONObject state, boolean dark) {
             int ink = accent(dark);
@@ -172,6 +182,7 @@ final class NativeMicrophoneUi {
         private static final float[] BARS = {.45f, .75f, 1f, .65f, .9f, .55f, .35f};
         private static final float[] COMPACT_BARS = {.5f, 1f, .7f};
         private final Paint brush = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final NativeIcon.Cache glyph = new NativeIcon.Cache();
         private final int kind;
         private int ink, level, progress;
         private boolean locking, stopping, warning, dark;
@@ -199,10 +210,10 @@ final class NativeMicrophoneUi {
             if (kind == 0) {
                 brush.setColor(locking ? accent(dark) : dark ? 0xffd2d6df : 0xff333945);
                 canvas.drawCircle(x, y, dp(22), brush);
-                icon(canvas, locking ? "lock" : "up", locking ? onAccent(dark) : ink, x, y, 20);
+                icon(canvas, glyph, locking ? "lock" : "up", locking ? onAccent(dark) : ink, x, y, 20);
                 if (locking) ring(canvas, brush, x, y, 20, onAccent(dark), progress);
             } else if (kind == 2) {
-                icon(canvas, warning ? "mic-off" : "mic", ink, x, y, 16);
+                icon(canvas, glyph, warning ? "mic-off" : "mic", ink, x, y, 16);
             } else if (kind == 4) {
                 brush.setColor(soft(dark));
                 canvas.drawCircle(x, y, dp(15), brush);

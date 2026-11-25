@@ -2,6 +2,7 @@ package com.kuiwaiwai.plumelink;
 
 final class AdaptiveLayout {
     enum Workspace { STACKED, NAVIGATION_RAIL, TWO_PANE }
+    enum Connection { STACKED, SCROLLING, ACTION_RAIL }
 
     static final int SHEET_MAX_WIDTH_DP = 560;
     static final int TOUCH_TARGET_DP = 48;
@@ -22,6 +23,19 @@ final class AdaptiveLayout {
     static int pageGutterDp(int widthDp, Workspace workspace) {
         if (workspace == Workspace.TWO_PANE) return Math.max(20, Math.min(40, Math.round(widthDp * .025f)));
         return widthDp < 360 ? 12 : 16;
+    }
+    static Connection connection(int widthDp, int heightDp) {
+        if (widthDp >= MEDIUM_WIDTH_DP && widthDp > heightDp
+            && (heightDp < MEDIUM_HEIGHT_DP || widthDp >= EXPANDED_WIDTH_DP)) return Connection.ACTION_RAIL;
+        return heightDp < MEDIUM_HEIGHT_DP ? Connection.SCROLLING : Connection.STACKED;
+    }
+    static int connectionRailDp(int widthDp) { return Math.min(304, Math.max(200, widthDp / 3)); }
+    static int sheetLimit(int measured, int visible, int content, int gap, boolean reading) {
+        int available = Math.max(0, measured);
+        if (visible > 0) available = Math.min(available, visible);
+        if (content > 0) available = Math.min(available, content);
+        int limit = Math.max(0, available - Math.max(0, gap));
+        return reading ? Math.min(limit, Math.round(available * .86f)) : limit;
     }
 
     static boolean fitsInline(int availableWidth, float leadingWidth, float trailingWidth, int gap) {

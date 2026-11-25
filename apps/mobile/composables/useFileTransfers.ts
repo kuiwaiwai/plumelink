@@ -1,14 +1,25 @@
+import { formatBytes } from "../../../shared/format";
 import { locale, t } from "../../../shared/i18n";
-import { ref, onMounted, onUnmounted, watch, type Ref } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, type Ref } from "vue";
 import { storage } from "../storage";
 import { androidBridge } from "../native/bridge";
 import { uploadResumable, MAX_FILE_BYTES, isSafeFileName } from "../file-transfer";
 import type { useConnection } from "../connection";
+import { formatTransferHistory, nativeTransferHistory, readTransferHistory, type TransferHistoryEntry } from "../../../shared/transfer-history";
 
 type TransferConnection = Pick<
   ReturnType<typeof useConnection>,
   "api" | "token" | "latency" | "fileAccessPending"
 >;
+export type UnfinishedDownload = { id: string; name: string; size: number; expected: number; available: boolean; version: string; folder?: string; pendingCommit?: boolean };
+export function downloadRecoveryStatus(file: UnfinishedDownload) {
+  if (file.pendingCommit) return t("保存结果待确认");
+  return file.available ? t("已接收 {0} / {1}", file.size < 0 ? "—" : formatBytes(file.size), formatBytes(file.expected)) : t("文件暂时无法访问");
+}
+export function downloadRecoveryLabel(files: readonly UnfinishedDownload[]) {
+  return files.some(file => file.pendingCommit) ? t("{0} 个待核对文件", files.length) : t("{0} 个未完成文件", files.length);
+}
+const MAX_FOLDER_LABEL_LENGTH = 8192;
 export function useFileTransfers(
   remote: TransferConnection,
   canFiles: Readonly<Ref<boolean>>,
@@ -23,6 +34,55 @@ export function useFileTransfers(
   const transferCancelling = ref(false);
   const transferProgress = ref(0);
   const transferMessage = ref("");
+  const unfinishedDownloads = ref<UnfinishedDownload[]>([]);
+  const recoveryBusy = ref(false);
+  const recoveryMessage = ref("");
+  let recoveryRequest = "";
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  function resolveUnfinishedDownload(file: UnfinishedDownload, keep: boolean) {
+    if (recoveryBusy.value || transferBusy.value || !android?.resolveUnfinishedDownload) return;
+    recoveryRequest = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+    recoveryBusy.value = true;
+    recoveryMessage.value = "";
+    recoveryTimer = setTimeout(() => {
+      recoveryBusy.value = false;
+      recoveryRequest = "";
+      recoveryMessage.value = t("处理超时，请刷新后核对文件。");
+    }, 15_000);
+    try { android.resolveUnfinishedDownload(file.id, file.version, keep, recoveryRequest); }
+    catch (error) {
+      clearTimeout(recoveryTimer); recoveryBusy.value = false; recoveryRequest = "";
+      recoveryMessage.value = error instanceof Error ? error.message : t("操作失败");
+    }
+  }
+  function nativeRecovery(event: Event) {
+    const value = (event as CustomEvent<unknown>).detail;
+    if (!value || typeof value !== "object") return;
+    const detail = value as { files?: unknown; message?: unknown; request?: unknown };
+    if (typeof detail.request === "string" && detail.request !== recoveryRequest) return;
+    if (detail.request === recoveryRequest && recoveryRequest) {
+      recoveryBusy.value = false;
+      recoveryRequest = "";
+      clearTimeout(recoveryTimer);
+    }
+    if (Array.isArray(detail.files)) {
+      const ids = new Set<string>();
+      unfinishedDownloads.value = detail.files.slice(0, 64).filter((file): file is UnfinishedDownload => {
+        if (!file || typeof file !== "object") return false;
+        const item = file as Record<string, unknown>;
+        if (typeof item.id !== "string" || !/^[a-f0-9]{32}$/.test(item.id) || ids.has(item.id)
+          || typeof item.name !== "string" || !item.name.length || item.name.length > 512 || /[\u0000-\u001f\u007f]/.test(item.name)
+          || !Number.isSafeInteger(item.size) || (item.size as number) < -1 || !Number.isSafeInteger(item.expected)
+          || (item.expected as number) < 0 || (item.expected as number) > MAX_FILE_BYTES
+          || typeof item.available !== "boolean" || typeof item.version !== "string"
+          || (item.pendingCommit !== undefined && typeof item.pendingCommit !== "boolean")
+          || (item.folder !== undefined && (typeof item.folder !== "string" || item.folder.length > 1024))
+          || !(item.version === "" || /^[a-f0-9]{64}$/.test(item.version))) return false;
+        ids.add(item.id); return true;
+      });
+    }
+    if (!recoveryBusy.value && typeof detail.message === "string" && detail.message.length <= 512) recoveryMessage.value = detail.message;
+  }
   let successTimer: ReturnType<typeof setTimeout> | undefined;
   let successMessage = "";
   function clearSuccess() {
@@ -36,22 +96,22 @@ export function useFileTransfers(
     successMessage = transferMessage.value = message;
     successTimer = setTimeout(clearSuccess, 3000);
   }
-  const transferHistory = ref<string[]>([]);
+  const historyEntries = ref<TransferHistoryEntry[]>([]);
+  const transferHistory = computed(() => historyEntries.value.map(formatTransferHistory));
   try {
     const history: unknown = JSON.parse(
       storage.getItem("plumelink-transfer-history") || "[]",
     );
-    if (Array.isArray(history))
-      transferHistory.value = history
-        .filter((item): item is string => typeof item === "string")
-        .slice(0, 10);
+    historyEntries.value = readTransferHistory(history);
   } catch {}
   let transferAbort: AbortController | null = null;
   let transferCancelled = false;
   let filesRequestSerial = 0;
+  let filesAbort: AbortController | undefined;
   let refreshAfterTransfer = false;
   let ignoreLateNativeEvents = false;
-  let nativeTransferBlocked: "stale" | "reconnecting" | false = false;
+  const nativeTransferBlocked = ref<"stale" | "reconnecting" | false>(false);
+  const canStartTransfer = computed(() => canFiles.value && !transferBusy.value && !nativeTransferBlocked.value);
   let nativeWatchdog: ReturnType<typeof setTimeout> | undefined;
   let cancelWatchdog: ReturnType<typeof setTimeout> | undefined;
   const clearNativeWatchdog = () => {
@@ -71,8 +131,8 @@ export function useFileTransfers(
       transferBusy.value = false;
       transferCancelling.value = false;
       ignoreLateNativeEvents = true;
-      nativeTransferBlocked = "stale";
-      transferMessage.value = t('文件传输长时间没有响应，已停止，请检查连接后重试');
+      nativeTransferBlocked.value = "stale";
+      transferMessage.value = t('文件传输长时间没有响应，已请求停止，请稍后刷新');
       refreshFilesAfterTransfer();
     }, 15 * 60 * 1000);
   };
@@ -84,8 +144,8 @@ export function useFileTransfers(
       transferBusy.value = false;
       transferCancelling.value = false;
       ignoreLateNativeEvents = true;
-      nativeTransferBlocked = "stale";
-      transferMessage.value = t('取消传输没有收到电脑确认，请检查连接后重试');
+      nativeTransferBlocked.value = "stale";
+      transferMessage.value = t('取消尚未完成，已暂停新传输，请稍后刷新');
       refreshFilesAfterTransfer();
     }, 15_000);
   };
@@ -93,24 +153,29 @@ export function useFileTransfers(
   const androidFolder = ref(receiveFolder());
   const folderReady = ref(!android || android.hasReceiveFolder?.() !== false);
   watch(locale, () => { androidFolder.value = receiveFolder(); });
-  function rememberTransfer(message: string) {
-    transferHistory.value = [
-      message,
-      ...transferHistory.value.filter((item) => item !== message),
+  function rememberTransfer(entry: TransferHistoryEntry) {
+    const serialized = JSON.stringify(entry);
+    historyEntries.value = [
+      entry,
+      ...historyEntries.value.filter(item => JSON.stringify(item) !== serialized),
     ].slice(0, 10);
     try {
       storage.setItem(
         "plumelink-transfer-history",
-        JSON.stringify(transferHistory.value),
+        JSON.stringify(historyEntries.value),
       );
     } catch {}
   }
   function clearTransferHistory() {
-    transferHistory.value = [];
+    historyEntries.value = [];
     storage.removeItem("plumelink-transfer-history");
   }
   async function loadFiles() {
+    try { android?.refreshReceiveFolder?.(); } catch {}
     const serial = ++filesRequestSerial;
+    filesAbort?.abort();
+    const request = new AbortController();
+    filesAbort = request;
     filesLoading.value = true;
     filesError.value = "";
     if (!canFiles.value) {
@@ -118,8 +183,9 @@ export function useFileTransfers(
       filesLoading.value = false;
       return;
     }
+    if (nativeTransferBlocked.value) android?.syncSession?.();
     try {
-      const response = await remote.api("/api/files");
+      const response = await remote.api("/api/files", { signal: request.signal });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || t('无法读取文件列表'));
       if (serial !== filesRequestSerial) return;
@@ -147,7 +213,7 @@ export function useFileTransfers(
       filesError.value = e instanceof Error ? e.message : t('无法读取文件列表');
       if (!canFiles.value) sharedFiles.value = [];
     } finally {
-      if (serial === filesRequestSerial) filesLoading.value = false;
+      if (serial === filesRequestSerial) { filesLoading.value = false; filesAbort = undefined; }
     }
   }
   function refreshFilesAfterTransfer() {
@@ -160,6 +226,10 @@ export function useFileTransfers(
     const files = Array.from(input.files || []);
     input.value = "";
     if (!files.length || transferBusy.value) return;
+    if (nativeTransferBlocked.value) {
+      transferMessage.value = t('上一项传输仍在停止，请稍后刷新');
+      return;
+    }
     if (files.length > 16) {
       transferMessage.value = t('每次最多选择 16 个文件');
       return;
@@ -169,6 +239,14 @@ export function useFileTransfers(
       transferMessage.value = t('文件名无效，请重命名后重试');
       return;
     }
+    const invalidSize = files.find(file => !Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES);
+    if (invalidSize) {
+      transferMessage.value = t('{0} 大小无效或超过 2 GB', invalidSize.name);
+      return;
+    }
+    clearSuccess();
+    let completedFiles = 0;
+    let lastSavedName = "";
     const tokenAtSelection = remote.token();
     transferCancelled = false;
     ignoreLateNativeEvents = false;
@@ -196,9 +274,7 @@ export function useFileTransfers(
         throw new Error(t('连接未恢复，文件未发送，请重试'));
       for (const file of files) {
         if (transferCancelled) throw new Error(t('已取消传输'));
-        transferProgress.value = 0;
-        if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES)
-          throw new Error(t('{0} 大小无效或超过 2 GB', file.name));
+        transferProgress.value = Math.floor(completedFiles * 100 / files.length);
         transferMessage.value = t('正在发送 {0}…', file.name);
         transferAbort = new AbortController();
         const startedAt = Date.now();
@@ -225,20 +301,28 @@ export function useFileTransfers(
           realtime: () => microphoneActive.value,
           latency: () => remote.latency.value,
           progress: (bytes, retrying) => {
-            transferProgress.value = file.size === 0 ? 100 : Math.floor((bytes / file.size) * 100);
+            const fraction = file.size === 0 ? 1 : Math.max(0, Math.min(1, bytes / file.size));
+            transferProgress.value = Math.min(99, Math.floor((completedFiles + fraction) * 100 / files.length));
             transferMessage.value = retrying
               ? t('网络中断，正在续传 {0}…', file.name)
               : t('正在发送 {0}{1}…', file.name, formatRate(bytes));
           },
         });
-        showSuccess(t('{0} 已保存到电脑', name));
-        rememberTransfer(t('发送：{0}', name));
+        completedFiles++;
+        lastSavedName = name;
+        rememberTransfer({ kind: "sent", name });
       }
+      transferProgress.value = 100;
+      showSuccess(files.length === 1 ? t('{0} 已保存到电脑', lastSavedName) : t('已发送 {0} 个文件', completedFiles));
     } catch (e) {
-      transferMessage.value = e instanceof Error ? e.message : t('文件发送失败');
+      const reason = e instanceof Error ? e.message : t('文件发送失败');
+      transferMessage.value = completedFiles > 0
+        ? t('已发送 {0}/{1} 个文件。{2}', completedFiles, files.length, reason) : reason;
     } finally {
       transferAbort = null;
       transferBusy.value = false;
+      transferCancelling.value = false;
+      clearCancelWatchdog();
       refreshFilesAfterTransfer();
     }
   }
@@ -249,8 +333,8 @@ export function useFileTransfers(
       transferMessage.value = t('请先选择 Android 接收目录，再保存电脑文件。');
       return;
     }
-    if (nativeTransferBlocked) {
-      transferMessage.value = t('上一项传输仍在停止，请稍后重试');
+    if (nativeTransferBlocked.value) {
+      transferMessage.value = t('上一项传输仍在停止，请稍后刷新');
       return;
     }
     if (
@@ -295,6 +379,13 @@ export function useFileTransfers(
     transferMessage.value = t('正在取消传输…');
     if (android && transferBusy.value) armCancelWatchdog();
   }
+  function chooseUploadFiles() {
+    if (!canStartTransfer.value) {
+      if (nativeTransferBlocked.value) transferMessage.value = t('上一项传输仍在停止，请稍后刷新');
+      return;
+    }
+    android?.chooseUploadFiles?.();
+  }
   const mayContinueNativeTransfer = () => !!android && !transferAbort && remote.fileAccessPending.value;
   watch([canFiles, remote.fileAccessPending], ([allowed], [wasAllowed]) => {
     if (allowed) {
@@ -309,6 +400,8 @@ export function useFileTransfers(
     }
     refreshAfterTransfer = false;
     filesRequestSerial++;
+    filesAbort?.abort();
+    filesAbort = undefined;
     filesLoading.value = false;
     filesError.value = "";
     sharedFiles.value = [];
@@ -317,7 +410,7 @@ export function useFileTransfers(
     const wasTransferring = transferBusy.value;
     transferCancelled = true;
     transferAbort?.abort();
-    if (android && !transferAbort && transferBusy.value) nativeTransferBlocked = "reconnecting";
+    if (android && !transferAbort && transferBusy.value) nativeTransferBlocked.value = "reconnecting";
     android?.cancelFileTransfer();
     clearNativeWatchdog();
     if (transferBusy.value && !transferAbort) transferBusy.value = false;
@@ -334,41 +427,47 @@ export function useFileTransfers(
       done?: boolean;
       succeeded?: boolean;
       snapshot?: boolean;
+      direction?: unknown;
+      fileName?: unknown;
+      fileCount?: unknown;
     } : null;
     if (!detail) return;
-    if (typeof detail.folder === "string" && detail.folder.length <= 512) {
+    if (typeof detail.folder === "string" && detail.folder.length <= MAX_FOLDER_LABEL_LENGTH) {
       androidFolder.value = detail.folder;
       folderReady.value = !android || android.hasReceiveFolder?.() !== false;
     }
     if (!canFiles.value && !(transferBusy.value && mayContinueNativeTransfer())) return;
     const isSnapshot = detail.snapshot === true;
-    if (nativeTransferBlocked === "stale") {
+    if (nativeTransferBlocked.value === "stale") {
       if (detail.done !== true) return;
-      nativeTransferBlocked = false;
+      nativeTransferBlocked.value = false;
       ignoreLateNativeEvents = false;
       // A stale completion clears the task guard but must leave the displayed error intact.
       refreshFilesAfterTransfer();
       return;
     }
-    if (nativeTransferBlocked === "reconnecting") {
+    if (nativeTransferBlocked.value === "reconnecting") {
       if (!isSnapshot) return;
-      nativeTransferBlocked = false;
+      nativeTransferBlocked.value = false;
       ignoreLateNativeEvents = false;
     }
     // Discard late progress and snapshots after cancellation or timeout.
     if (isSnapshot && ignoreLateNativeEvents) return;
     if (!isSnapshot && ignoreLateNativeEvents) return;
     if (isSnapshot) ignoreLateNativeEvents = false;
-    // Repeated snapshots must not extend the transfer deadline.
-    if (transferBusy.value && (!isSnapshot || nativeWatchdog === undefined))
-      armNativeWatchdog();
+    if (detail.done === true && detail.succeeded === false && detail.direction === "send"
+      && typeof detail.fileCount === "number" && Number.isSafeInteger(detail.fileCount)
+      && detail.fileCount >= 1 && detail.fileCount <= 16 && (!isSnapshot || transferBusy.value)) {
+      const completed = nativeTransferHistory(detail, "");
+      if (completed) rememberTransfer(completed);
+    }
     if (typeof detail.message === "string" && detail.message.length <= 512) {
       const succeeded = detail.done !== false && (detail.succeeded === true ||
         (detail.succeeded === undefined && (detail.message.includes('已保存') || detail.message.includes('已发送'))));
       if (succeeded) {
         if (!isSnapshot || transferBusy.value) {
           showSuccess(detail.message);
-          rememberTransfer(detail.message);
+          rememberTransfer(nativeTransferHistory(detail, detail.message));
         }
       } else if (detail.message || !isSnapshot) {
         clearSuccess();
@@ -386,6 +485,9 @@ export function useFileTransfers(
         refreshFilesAfterTransfer();
       }
     }
+    // Repeated snapshots must not extend the transfer deadline.
+    if (transferBusy.value && (!isSnapshot || nativeWatchdog === undefined))
+      armNativeWatchdog();
   }
   const syncFolder = () => {
     androidFolder.value = receiveFolder();
@@ -396,12 +498,17 @@ export function useFileTransfers(
     android?.syncSession?.();
   };
   onMounted(() => {
+    window.addEventListener("plumelink-download-recovery", nativeRecovery);
     window.addEventListener("plumelink-native-transfer", nativeTransfer);
     window.addEventListener("plumelink-native-folder", syncFolder);
     window.addEventListener("pageshow", resume);
     resume();
   });
   onUnmounted(() => {
+    clearTimeout(recoveryTimer);
+    window.removeEventListener("plumelink-download-recovery", nativeRecovery);
+    filesRequestSerial++;
+    filesAbort?.abort();
     clearSuccess();
     if (transferBusy.value && !android?.syncSession) cancelTransfer();
     clearNativeWatchdog();
@@ -411,10 +518,12 @@ export function useFileTransfers(
     window.removeEventListener("pageshow", resume);
   });
   return {
+    unfinishedDownloads, recoveryBusy, recoveryMessage, resolveUnfinishedDownload,
     sharedFiles,
     filesLoading,
     filesError,
     transferBusy,
+    canStartTransfer,
     transferCancelling,
     transferProgress,
     transferMessage,
@@ -423,6 +532,7 @@ export function useFileTransfers(
     folderReady,
     loadFiles,
     uploadFiles,
+    chooseUploadFiles,
     downloadFile,
     cancelTransfer,
     clearTransferHistory,

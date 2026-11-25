@@ -4,11 +4,15 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Condvar, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::oneshot;
 
+pub type WindowReader = Arc<dyn Fn() -> Result<serde_json::Value, String> + Send + Sync>;
+
 pub trait Native: Send + 'static {
+    fn window_reader(&self) -> Option<WindowReader> { None }
+    fn launch_queue(&self) -> Option<Arc<crate::launcher::jobs::LaunchQueue>> { None }
     fn qft_apply_for(
         &mut self,
         session: u64,
@@ -85,8 +89,13 @@ enum Work {
     EndSession,
     Probe,
     ProbeWindows,
-    SwitchWindow { hwnd: u64, deadline: Instant, started: oneshot::Sender<()> },
-    Restore(f32),
+    SwitchWindow {
+        hwnd: u64,
+        deadline: Instant,
+        started: oneshot::Sender<()>,
+        authorize: Box<dyn FnOnce() -> Result<(), String> + Send>,
+    },
+    Restore { value: f32, deadline: Instant, started: oneshot::Sender<()> },
 }
 enum JobReplies {
     Json(Vec<Reply>),
@@ -145,17 +154,53 @@ impl Job {
 struct Queue {
     jobs: VecDeque<Job>,
     sessions: HashSet<u64>,
+    failures: HashMap<u64, crate::qft::Failure>,
     closing: bool,
+    suspended: bool,
+    reset_pending: bool,
+    generation: u64,
 }
 struct Inner {
     queue: Mutex<Queue>,
     wake: Condvar,
+    boundary: tokio::sync::watch::Sender<u64>,
+}
+pub(crate) struct PowerInput {
+    inner: std::sync::Weak<Inner>,
+    launch: Option<std::sync::Weak<crate::launcher::jobs::LaunchQueue>>,
+}
+impl PowerInput {
+    pub(crate) fn transition(&self, suspended: bool, automatic: bool) {
+        if let Some(inner) = self.inner.upgrade() {
+            let launch = self.launch.as_ref().and_then(std::sync::Weak::upgrade);
+            Controller::power_transition(&inner, launch.as_deref(), suspended, automatic);
+        }
+    }
+}
+struct ExecutionClock {
+    monotonic: Instant,
+    wall: SystemTime,
+}
+impl ExecutionClock {
+    fn new() -> Self { Self { monotonic: Instant::now(), wall: SystemTime::now() } }
+    fn interrupted(&mut self) -> bool {
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        let interrupted = now.duration_since(self.monotonic) >= Duration::from_secs(5)
+            || wall.duration_since(self.wall).is_ok_and(|gap| gap >= Duration::from_secs(5));
+        self.monotonic = now;
+        self.wall = wall;
+        interrupted
+    }
 }
 pub struct Controller {
     inner: Arc<Inner>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     pub admin: Arc<crate::admin_control::AdminManager>,
     pub audio: Arc<crate::microphone::AudioHub>,
+    pub launch_queue: Option<Arc<crate::launcher::jobs::LaunchQueue>>,
+    windows: Option<WindowReader>,
+    window_slots: Arc<tokio::sync::Semaphore>,
 }
 impl Controller {
     pub fn start(
@@ -171,16 +216,21 @@ impl Controller {
             queue: Mutex::new(Queue {
                 jobs: VecDeque::new(),
                 sessions: HashSet::new(),
+                failures: HashMap::new(),
                 closing: false,
+                suspended: false,
+                reset_pending: false,
+                generation: 0,
             }),
             wake: Condvar::new(),
+            boundary: tokio::sync::watch::channel(0).0,
         });
         let worker_inner = inner.clone();
         let (init_tx, init_rx) = std::sync::mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
             let mut native = match factory() {
                 Ok(n) => {
-                    let _ = init_tx.send(Ok(()));
+                    let _ = init_tx.send(Ok((n.window_reader(), n.launch_queue())));
                     n
                 }
                 Err(e) => {
@@ -189,12 +239,35 @@ impl Controller {
                 }
             };
             let mut last = Instant::now();
+            let launch_queue = native.launch_queue();
+            let mut clock = ExecutionClock::new();
             let mut stale_motion = HashSet::new();
             let mut pending_release = HashSet::new();
             let mut last_release_retry = Instant::now();
             let epoch = Instant::now();
             let mut qft: HashMap<u64, crate::qft::Session> = HashMap::new();
             loop {
+                let mut q = worker_inner.queue.lock().unwrap();
+                if clock.interrupted() && !q.reset_pending {
+                    Self::invalidate_inputs(&worker_inner, &mut q, launch_queue.as_deref());
+                }
+                if q.reset_pending && !q.closing {
+                    let generation = q.generation;
+                    drop(q);
+                    if let Some(launch) = &launch_queue { launch.cancel_all(); }
+                    qft.clear();
+                    stale_motion.clear();
+                    pending_release.clear();
+                    let released = native.end_session().is_ok();
+                    let mut q = worker_inner.queue.lock().unwrap();
+                    if released && q.generation == generation { q.reset_pending = false; }
+                    if !released {
+                        let (q, _) = worker_inner.wake.wait_timeout(q, Duration::from_millis(250)).unwrap();
+                        drop(q);
+                    }
+                    continue;
+                }
+                drop(q);
                 // Run expiry on the input thread so release completes before it is acknowledged.
                 let now = epoch.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 for (&session, state) in &mut qft {
@@ -210,7 +283,9 @@ impl Controller {
                     let _ = native.end_session();
                     break;
                 }
+                if q.reset_pending { continue; }
                 if let Some(job) = q.jobs.pop_front() {
+                    let generation = q.generation;
                     drop(q);
                     let started = Instant::now();
                     // Discarding unexecuted motion must never release another session's input.
@@ -219,6 +294,11 @@ impl Controller {
                             stale_motion.insert(*session);
                         }
                         job.replies.send_err("运动已过期，已丢弃");
+                        continue;
+                    }
+                    if matches!(job.work, Work::Probe | Work::ProbeWindows)
+                        && matches!(&job.replies, JobReplies::Json(replies) if replies.iter().all(|reply| reply.is_closed()))
+                    {
                         continue;
                     }
                     // A click must not silently target the old position after discarded motion.
@@ -233,6 +313,10 @@ impl Controller {
                                 .send_err("移动已过期，位置可能未同步，请确认位置后重试");
                             continue;
                         }
+                    }
+                    if !Self::current_work(&worker_inner, &mut clock, generation, launch_queue.as_deref()) {
+                        job.replies.send_err("连接变化，操作已取消");
+                        continue;
                     }
                     enum WorkOutcome {
                         Json(Result<serde_json::Value, String>),
@@ -271,7 +355,7 @@ impl Controller {
                                 qft.get_mut(&session)
                                     .ok_or_else(|| "QFT 未初始化".to_string())
                                     .and_then(|state| {
-                                        state.receive(
+                                        let result = state.receive(
                                             session,
                                             frame,
                                             epoch.elapsed().as_micros().min(u64::MAX as u128)
@@ -282,7 +366,15 @@ impl Controller {
                                                 .min(u32::MAX as u128)
                                                 as u32,
                                             native.as_mut(),
-                                        )
+                                        );
+                                        if let Some(failure) = state.failure.as_ref().filter(|failure|
+                                            result.as_ref().is_ok_and(|reply| failure.matches(*reply))) {
+                                            let mut queue = worker_inner.queue.lock().unwrap();
+                                            if queue.sessions.contains(&session) {
+                                                queue.failures.insert(session, failure.clone());
+                                            }
+                                        }
+                                        result
                                     })
                                     .map(|frame| Some(crate::qft::encoded(frame))),
                             )
@@ -346,19 +438,30 @@ impl Controller {
                         }
                         Work::Probe => WorkOutcome::Json(native.probe()),
                         Work::ProbeWindows => WorkOutcome::Json(native.probe_windows()),
-                        Work::SwitchWindow { hwnd, deadline, started } => {
-                            let result = if Instant::now() >= deadline || started.send(()).is_err() {
+                        Work::SwitchWindow { hwnd, deadline, started, authorize } => {
+                            let result = if Instant::now() >= deadline || started.is_closed() {
                                 Err("窗口切换超时".into())
                             } else {
-                                native.switch_to_window(hwnd).map(|_| serde_json::Value::Null)
+                                authorize().and_then(|()| {
+                                    if !Self::current_work(&worker_inner, &mut clock, generation, launch_queue.as_deref()) {
+                                        Err("连接变化，操作已取消".into())
+                                    } else if Instant::now() >= deadline || started.send(()).is_err() {
+                                        Err("窗口切换超时".into())
+                                    } else {
+                                        native.switch_to_window(hwnd).map(|_| serde_json::Value::Null)
+                                    }
+                                })
                             };
                             WorkOutcome::Json(result)
                         }
-                        Work::Restore(value) => WorkOutcome::Json(
-                            native
-                                .restore_volume(value)
-                                .map(|_| serde_json::Value::Null),
-                        ),
+                        Work::Restore { value, deadline, started } => {
+                            let result = if Instant::now() >= deadline || started.send(()).is_err() {
+                                Err("音量恢复超时".into())
+                            } else {
+                                native.restore_volume(value).map(|_| serde_json::Value::Null)
+                            };
+                            WorkOutcome::Json(result)
+                        },
                     };
                     // Each QFT execution failure closes/releases its own lease.
                     // A malformed request must not release another device's input.
@@ -394,12 +497,15 @@ impl Controller {
                 }
             }
         });
-        init_rx.recv().map_err(|_| "Windows 控制线程无法启动")??;
+        let (windows, launch_queue) = init_rx.recv().map_err(|_| "Windows 控制线程无法启动")??;
         Ok(Arc::new(Self {
             inner,
             worker: Mutex::new(Some(worker)),
             admin,
             audio: Arc::new(crate::microphone::AudioHub::default()),
+            launch_queue,
+            windows,
+            window_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }))
     }
     fn clear(q: &mut Queue) {
@@ -430,16 +536,57 @@ impl Controller {
         }
         q.jobs = keep;
     }
-    pub fn activate(&self, session: u64) {
+    fn invalidate_inputs(inner: &Inner, q: &mut Queue, launch: Option<&crate::launcher::jobs::LaunchQueue>) {
+        Self::clear(q);
+        q.sessions.clear();
+        q.failures.clear();
+        q.reset_pending = true;
+        q.generation = q.generation.wrapping_add(1);
+        if let Some(launch) = launch { launch.cancel_all(); }
+        inner.boundary.send_replace(q.generation);
+        inner.wake.notify_one();
+    }
+    fn current_work(inner: &Inner, clock: &mut ExecutionClock, generation: u64, launch: Option<&crate::launcher::jobs::LaunchQueue>) -> bool {
+        let mut q = inner.queue.lock().unwrap();
+        if clock.interrupted() && !q.reset_pending {
+            Self::invalidate_inputs(inner, &mut q, launch);
+        }
+        !q.closing && !q.suspended && !q.reset_pending && q.generation == generation
+    }
+    fn power_transition(inner: &Inner, launch: Option<&crate::launcher::jobs::LaunchQueue>, suspended: bool, automatic: bool) {
+        let mut q = inner.queue.lock().unwrap();
+        if q.closing || (suspended && q.suspended) || (!suspended && !automatic && !q.suspended) { return; }
+        q.suspended = suspended;
+        Self::invalidate_inputs(inner, &mut q, launch);
+    }
+    pub(crate) fn power_input(&self) -> Arc<PowerInput> {
+        Arc::new(PowerInput { inner: Arc::downgrade(&self.inner), launch: self.launch_queue.as_ref().map(Arc::downgrade) })
+    }
+    pub fn suspend_inputs(&self) {
+        Self::power_transition(&self.inner, self.launch_queue.as_deref(), true, false);
+    }
+    pub fn resume_inputs(&self, automatic: bool) {
+        Self::power_transition(&self.inner, self.launch_queue.as_deref(), false, automatic);
+    }
+    pub fn input_boundary(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.boundary.subscribe() }
+    pub fn input_available(&self) -> bool {
+        let q = self.inner.queue.lock().unwrap();
+        !q.closing && !q.suspended && !q.reset_pending
+    }
+    pub fn activate(&self, session: u64) -> bool {
         if session == 0 {
             self.revoke();
-            return;
+            return false;
         }
         let mut q = self.inner.queue.lock().unwrap();
+        if q.closing || q.suspended || q.reset_pending { return false; }
         q.sessions.insert(session);
+        true
     }
     pub fn release_for(&self, session: u64) {
+        if let Some(queue) = &self.launch_queue { queue.cancel_session(session); }
         let mut q = self.inner.queue.lock().unwrap();
+        q.failures.remove(&session);
         if !q.sessions.remove(&session) {
             return;
         }
@@ -453,11 +600,21 @@ impl Controller {
         self.inner.wake.notify_one();
     }
     pub fn revoke(&self) {
+        if let Some(queue) = &self.launch_queue { queue.cancel_all(); }
         let mut q = self.inner.queue.lock().unwrap();
+        q.failures.clear();
         Self::clear(&mut q);
         q.sessions.clear();
         q.jobs.push_front(Job::new(Work::EndSession, vec![]));
         self.inner.wake.notify_one();
+    }
+    pub fn qft_failure(&self, session: u64, bytes: &QftFrameBytes) -> Option<crate::qft::Failure> {
+        let frame = qfast_transmission::decode(bytes).ok()?;
+        if frame.session != session || !matches!(frame.body, qfast_transmission::Body::Ack {
+            action_id: 1.., status: qfast_transmission::Status::ExecutionUncertain, ..
+        }) { return None; }
+        let queue = self.inner.queue.lock().unwrap();
+        queue.failures.get(&session).filter(|failure| failure.matches(frame)).cloned()
     }
     pub fn submit(
         &self,
@@ -477,6 +634,26 @@ impl Controller {
         if q.closing || !q.sessions.contains(&session) {
             let _ = tx.send(Err("连接已失效".into()));
             return rx;
+        }
+        if !priority {
+            let replace_motion = match (q.jobs.back(), &work) {
+                (Some(Job { work: Work::QftFrame(owner, previous), .. }), Work::QftFrame(_, next))
+                    if *owner == session && previous.session == next.session
+                        && previous.lease == next.lease && previous.serial < next.serial =>
+                {
+                    matches!((previous.body, next.body),
+                        (qfast_transmission::Body::Checkpoint { version: old, .. },
+                         qfast_transmission::Body::Checkpoint { version: new, .. }) if old < new)
+                }
+                _ => false,
+            };
+            if replace_motion {
+                let previous = q.jobs.back_mut().unwrap();
+                previous.work = work;
+                // Keep the oldest enqueue time; new motion cannot freshen an expired prefix.
+                std::mem::replace(&mut previous.replies, JobReplies::Qft(tx)).supersede();
+                return rx;
+            }
         }
         if priority {
             Self::clear_session_work(&mut q, session, true);
@@ -646,7 +823,7 @@ impl Controller {
         let (tx, rx) = oneshot::channel();
         {
             let mut q = self.inner.queue.lock().unwrap();
-            if q.closing || q.jobs.len() >= 16 {
+            if q.closing || q.suspended || q.reset_pending || q.jobs.len() >= 16 {
                 return Err("控制不可用".into());
             }
             q.jobs.push_back(Job::new(work, vec![tx]));
@@ -665,17 +842,37 @@ impl Controller {
         self.diagnostic(Work::Probe).await
     }
     pub async fn restore_volume(&self, value: f32) -> Result<(), String> {
-        self.diagnostic(Work::Restore(value)).await.map(|_| ())
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let (started, mut start) = oneshot::channel();
+        let result = self.queue_diagnostic(Work::Restore { value, deadline, started })?;
+        if tokio::time::timeout_at(deadline.into(), &mut start).await.is_err() {
+            start.close();
+            if start.try_recv().is_err() { return Err("音量恢复超时".into()); }
+        }
+        result.await.map_err(|_| "控制线程已退出")?.map(|_| ())
     }
     pub async fn probe_windows(&self) -> Result<serde_json::Value, String> {
+        if self.inner.queue.lock().unwrap().closing { return Err("控制不可用".into()); }
+        if let Some(read) = &self.windows {
+            let permit = self.window_slots.clone().try_acquire_owned()
+                .map_err(|_| "正在读取窗口列表，请稍后刷新")?;
+            let read = read.clone();
+            let task = tokio::task::spawn_blocking(move || { let _permit = permit; read() });
+            let result = tokio::time::timeout(Duration::from_secs(4), task).await
+                .map_err(|_| "窗口列表超时")?.map_err(|_| "无法读取窗口列表")?;
+            if self.inner.queue.lock().unwrap().closing { return Err("控制不可用".into()); }
+            return result;
+        }
         self.diagnostic(Work::ProbeWindows)
             .await
             .map_err(|error| if error == "诊断超时" { "窗口列表超时".to_string() } else { error })
     }
-    pub async fn switch_window(&self, hwnd: u64) -> Result<(), String> {
+    pub async fn switch_window(
+        &self, hwnd: u64, authorize: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(4);
         let (started, mut start) = oneshot::channel();
-        let result = self.queue_diagnostic(Work::SwitchWindow { hwnd, deadline, started })?;
+        let result = self.queue_diagnostic(Work::SwitchWindow { hwnd, deadline, started, authorize: Box::new(authorize) })?;
         if tokio::time::timeout_at(deadline.into(), &mut start).await.is_err() {
             start.close();
             if start.try_recv().is_err() {
@@ -686,6 +883,7 @@ impl Controller {
         result.await.map_err(|_| "控制线程已退出")?.map(|_| ())
     }
     pub fn shutdown(&self) {
+        if let Some(queue) = &self.launch_queue { queue.close(); }
         self.audio.stop();
         {
             let mut q = self.inner.queue.lock().unwrap();
@@ -701,5 +899,22 @@ impl Controller {
 impl Drop for Controller {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    #[test]
+    fn execution_gap_uses_both_clocks_and_resets_its_baseline() {
+        let mut clock = ExecutionClock::new();
+        assert!(!clock.interrupted());
+        clock.monotonic -= Duration::from_secs(6);
+        assert!(clock.interrupted());
+        assert!(!clock.interrupted());
+        clock.wall -= Duration::from_secs(6);
+        assert!(clock.interrupted());
+        clock.wall += Duration::from_secs(60);
+        assert!(!clock.interrupted());
     }
 }

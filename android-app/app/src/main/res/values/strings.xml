@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="ui_reinstalled_pc_trust">The PC identity or certificate has changed, which can happen after reinstalling. Compare the fingerprint with the PC before trusting it again. Only this PC will need to be paired again; other PCs are unaffected. Cancel if you did not reinstall or change the PC.</string>
+    <string name="ui_verify_usb_pc">"Compare this address and certificate with Preferences → USB connection → Verify PC certificate on Windows.\n\n"</string>
+    <string name="ui_usb_connection">USB connection</string>
+    <string name="ui_connect_wirelessly">Connect over Wi-Fi</string>
+    <string name="ui_usb_help">USB: connect a data cable, enable USB debugging in your phone’s developer options and allow this computer. In PlumeLink on Windows, open Preferences → USB connection, choose this phone and connect. Confirm the PC and enter its pairing code on first use.</string>
     <string name="ui_expand_sheet">Expand panel</string>
     <string name="ui_collapse_sheet">Collapse panel</string>
     <string name="ui_remote_connection_active">Remote connection active</string>
@@ -40,7 +45,10 @@
     <string name="ui_previously_connected_pc">"Previously connected PC"</string>
     <string name="ui_new_device">"New device"</string>
     <string name="ui_recognized">"Recognized"</string>
-    <string name="ui_address_updated">"Address updated"</string>
+    <string name="ui_address_updated">"New address found"</string>
+    <string name="ui_pc_identity_changed">"The PC identity changed. Your pairing was kept. Check the address; if the PC app was reinstalled, remove its old entry and pair again."</string>
+    <string name="ui_not_plumelink_service">"This address did not respond as PlumeLink. Check the address and port shown on the PC."</string>
+    <string name="ui_verifying_pc">"Checking this PC…"</string>
     <string name="ui_available">"Available"</string>
     <string name="ui_unreachable">"Unreachable"</string>
     <string name="ui_search_failed">"Search failed ("</string>
@@ -64,6 +72,8 @@
     <string name="ui_name_e_g_study_pc">"Name, e.g. Study PC"</string>
     <string name="ui_location_e_g_upstairs_study">"Location, e.g. Upstairs study"</string>
     <string name="ui_pc_name_and_location">"PC name and location"</string>
+    <string name="ui_pc_name">"Name"</string>
+    <string name="ui_pc_location">"Location"</string>
     <string name="ui_save">"Save"</string>
     <string name="ui_pc_details_saved">"PC details saved"</string>
     <string name="ui_clear">"Clear"</string>
@@ -72,10 +82,12 @@
     <string name="ui_system_file_picker_unavailable">"System file picker unavailable"</string>
     <string name="ui_choose_a_download_folder">"Choose a download folder"</string>
     <string name="ui_selected">"Selected: "</string>
+    <string name="ui_internal_storage">Internal storage</string>
+    <string name="ui_external_storage">External storage</string>
     <string name="ui_android_download_folder_selected">"Android download folder selected"</string>
     <string name="ui_android_download_folder_unavailable">The download folder is unavailable. Choose a folder again.</string>
     <string name="ui_notifications_are_off_enable_them_in_connection_help_fo">"Notifications are off. Enable them in Connection help for background transfer and microphone updates."</string>
-    <string name="ui_microphone_permission_granted_press_and_hold_again">"Microphone permission granted. Tap again to start."</string>
+    <string name="ui_microphone_permission_granted_press_and_hold_again">Microphone access granted. Start the microphone again when you are ready.</string>
     <string name="ui_microphone_permission_denied_enable_it_in_settings">"Microphone permission denied. Enable it in Settings."</string>
     <string name="ui_background_service_is_starting_try_again">"Background service is starting. Try again."</string>
     <string name="ui_connect_to_a_pc_first">"Connect to a PC first"</string>
@@ -142,6 +154,8 @@
     <string name="app_name">"PlumeLink"</string>
     <string name="mic_privacy_muted">System microphone muted. Check the phone’s microphone privacy switch.</string>
     <string name="mic_capture_silenced">Android paused recording. Check for calls or other apps using the microphone.</string>
+    <string name="mic_connecting">Connecting microphone…</string>
+    <string name="mic_reconnecting">Reconnecting microphone…</string>
     <string name="ui_transfer_timeout">The transfer stopped after two hours. Try again on a stable connection.</string>
     <string name="ui_transfer_upload_rejected">The PC rejected the upload (%1$d). Check your file transfer permission and try again.</string>
     <string name="ui_transfer_upload_unavailable">The PC could not receive the file (%1$d). Check the PC connection and try again.</string>
@@ -167,4 +181,48 @@
     <string name="ui_permission_settings">Open settings</string>
     <string name="ui_pair_again">Pair again</string>
     <string name="ui_pair_again_explanation">This clears the pairing credential on this phone and keeps the saved PC. Enter the pairing code displayed on the PC to reconnect.</string>
+    <plurals name="ui_batch_partially_sent">
+        <item quantity="one">Sent %1$d/%2$d file. %3$s</item>
+        <item quantity="other">Sent %1$d/%2$d files. %3$s</item>
+    </plurals>
+    <string name="ui_previous_transfer_interrupted">The previous transfer did not finish normally. Check the received file before selecting it again to retry.</string>
+    <string name="ui_unfinished_download_changed">The file changed. Refresh and check it before trying again.</string>
+    <string name="ui_unfinished_download_remove_failed">Could not remove the file. Check folder access and try again.</string>
+    <string name="ui_share_pending">Pending files · %1$d</string>
+    <string name="ui_share_clear">Clear</string>
+    <string name="ui_share_retry">Read again</string>
+    <string name="ui_share_reading">Reading files…</string>
+    <string name="ui_share_connect_first">Choose a PC and allow file access, then confirm sending.</string>
+    <string name="ui_share_invalid">No valid files received. Share up to 16 files from a gallery or file manager.</string>
+    <string name="ui_share_unreadable">Cannot read this file. Try reading it again, or share it again from the source app.</string>
+    <string name="ui_share_file_changed">The file changed. Select it again before sending.</string>
+    <string name="ui_share_not_started">Transfer could not start. Wait for any current transfer to finish, then try again.</string>
+    <string name="ui_usb_connection_expired">USB connection expired. Reconnect the phone in PC Preferences → USB connection.</string>
+    <string name="ui_usb_connection_expired_status">USB connection expired</string>
+    <string name="ui_microphone_background_denied">Android could not keep the microphone running. Return to the app and start it again.</string>
+    <string name="ui_transfer_pairing_expired">Pairing has expired. Reconnect to the PC and pair again before transferring files.</string>
+    <string name="ui_transfer_permission_denied">File transfer permission is off. Enable file transfer in the PC device permissions, then try again.</string>
+    <string name="ui_upload_result_unconfirmed">Sending stopped. The PC save result could not be confirmed. Check the PC receive folder before sending this file again.</string>
+    <plurals name="ui_upload_partial_unconfirmed">
+        <item quantity="one">The PC confirmed saving %1$d of %2$d file. %3$s</item>
+        <item quantity="other">The PC confirmed saving %1$d of %2$d files. %3$s</item>
+    </plurals>
+    <plurals name="ui_upload_cancelled_partial">
+        <item quantity="one">Sending stopped. The PC saved %1$d of %2$d file.</item>
+        <item quantity="other">Sending stopped. The PC saved %1$d of %2$d files.</item>
+    </plurals>
+    <plurals name="ui_upload_cancel_completed">
+        <item quantity="one">The PC already saved %1$d file before cancellation could finish.</item>
+        <item quantity="other">The PC already saved %1$d files before cancellation could finish.</item>
+    </plurals>
+    <string name="ui_file_provider_busy">This file location is still handling a previous operation. Choose files from another location or try again later.</string>
+    <string name="ui_file_provider_slow">The file location is not responding. Stopping this transfer…</string>
+    <string name="ui_download_result_unconfirmed">Stopped waiting for the file operation. The save result is not confirmed. Check the selected Android folder before trying again.</string>
+    <string name="ui_file_provider_stopped">Transfer cancelled. This file location is still responding. Choose another location or try again later.</string>
+    <string name="ui_connection_recovery_searching">Finding this PC…</string>
+    <string name="ui_connection_recovery_not_found">No connection could be restored. Check that PlumeLink is running on the PC and both devices are on the same network.</string>
+    <string name="ui_connection_recovery_busy">Stop microphone capture and wait for file transfers to finish before restoring the connection.</string>
+    <string name="ui_connection_recovery_unavailable">This connection cannot be restored here. Return to the PC list and reconnect.</string>
+    <string name="ui_connection_recovery_cancelled">Search stopped. The original connection details are kept.</string>
+    <string name="ui_could_not_open_background_settings">Open system settings and allow PlumeLink to run in the background.</string>
 </resources>

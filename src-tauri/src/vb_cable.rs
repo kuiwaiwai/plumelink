@@ -10,9 +10,6 @@ pub fn installed() -> bool {
 pub fn install(bundled_archive: Option<std::path::PathBuf>) -> Result<(), String> {
     static INSTALL: Mutex<()> = Mutex::new(());
     let _guard = INSTALL.try_lock().map_err(|_| "安装程序正在运行")?;
-    if installed() {
-        return Ok(());
-    }
     // The official setup can hand driver loading to a second process after its UI exits.
     // Keep the extracted files available through that handoff and a possible restart.
     let staging_root = std::path::PathBuf::from(

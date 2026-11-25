@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="ui_reinstalled_pc_trust">電腦身分或憑證已變化，重新安裝電腦端後可能出現此情況。請與電腦端核對指紋後重新信任，僅需重新配對此電腦，不影響其他電腦。若沒有重新安裝或更換電腦，請取消連線。</string>
+    <string name="ui_verify_usb_pc">"請與電腦「偏好設定 → USB 有線連線 → 核對電腦憑證」中的位址和憑證核對。\n\n"</string>
+    <string name="ui_usb_connection">USB 有線連線</string>
+    <string name="ui_connect_wirelessly">透過無線連線</string>
+    <string name="ui_usb_help">USB 連線：使用資料線連接電腦，在手機開發人員選項中開啟 USB 偵錯並允許這台電腦。開啟電腦羽連的「偏好設定 → USB 有線連線」，選擇這台手機並連線。首次使用仍需確認電腦並輸入配對碼。</string>
     <string name="ui_expand_sheet">展開抽屜</string>
     <string name="ui_collapse_sheet">收起抽屜</string>
     <string name="ui_remote_connection_active">遙控連線正在執行</string>
@@ -40,7 +45,10 @@
     <string name="ui_previously_connected_pc">"已連線過的電腦"</string>
     <string name="ui_new_device">"新裝置"</string>
     <string name="ui_recognized">"已識別"</string>
-    <string name="ui_address_updated">"位址已更新"</string>
+    <string name="ui_address_updated">"發現新位址"</string>
+    <string name="ui_pc_identity_changed">"電腦身分發生變化，已保留原有配對。請核對位址；若已重新安裝電腦端，請移除舊記錄後重新配對。"</string>
+    <string name="ui_not_plumelink_service">"此位址未傳回羽連服務，請核對電腦端顯示的位址與連接埠。"</string>
+    <string name="ui_verifying_pc">"正在核對電腦…"</string>
     <string name="ui_available">"可連接"</string>
     <string name="ui_unreachable">"暫不可達"</string>
     <string name="ui_search_failed">"搜尋啟動失敗（"</string>
@@ -64,6 +72,8 @@
     <string name="ui_name_e_g_study_pc">"別名，例如：書房電腦"</string>
     <string name="ui_location_e_g_upstairs_study">"位置備注，例如：二樓書房"</string>
     <string name="ui_pc_name_and_location">"電腦名稱與位置"</string>
+    <string name="ui_pc_name">"名稱"</string>
+    <string name="ui_pc_location">"位置"</string>
     <string name="ui_save">"保存"</string>
     <string name="ui_pc_details_saved">"電腦資訊已保存"</string>
     <string name="ui_clear">"清空"</string>
@@ -72,10 +82,12 @@
     <string name="ui_system_file_picker_unavailable">"未找到系統檔案選擇器"</string>
     <string name="ui_choose_a_download_folder">"未設定，請選擇目錄"</string>
     <string name="ui_selected">"已選擇："</string>
+    <string name="ui_internal_storage">內部儲存空間</string>
+    <string name="ui_external_storage">外部儲存空間</string>
     <string name="ui_android_download_folder_selected">"已選擇 Android 保存目錄"</string>
     <string name="ui_android_download_folder_unavailable">接收資料夾無法使用，請重新選擇。</string>
     <string name="ui_notifications_are_off_enable_them_in_connection_help_fo">"未開啟通知權限，背景傳輸或麥克風狀態不會顯示在通知欄，可在連線說明中前往開啟"</string>
-    <string name="ui_microphone_permission_granted_press_and_hold_again">"麥克風權限已開啟，請再次點按開啟"</string>
+    <string name="ui_microphone_permission_granted_press_and_hold_again">已允許錄音，請再次開啟麥克風。</string>
     <string name="ui_microphone_permission_denied_enable_it_in_settings">"未獲得麥克風權限，可在系統設定中開啟"</string>
     <string name="ui_background_service_is_starting_try_again">"背景服務正在初始化，請重試"</string>
     <string name="ui_connect_to_a_pc_first">"請先連線至電腦"</string>
@@ -142,6 +154,8 @@
     <string name="app_name">"羽連 PlumeLink"</string>
     <string name="mic_privacy_muted">系統麥克風已靜音，請檢查手機的麥克風隱私開關</string>
     <string name="mic_capture_silenced">系統暫停了此應用的收音，請檢查通話或其他正在使用麥克風的應用</string>
+    <string name="mic_connecting">正在連線麥克風…</string>
+    <string name="mic_reconnecting">正在重新連線麥克風…</string>
     <string name="ui_transfer_timeout">傳輸超過兩小時，已停止。請在網路穩定後重試。</string>
     <string name="ui_transfer_upload_rejected">電腦拒絕了上傳（%1$d）。請檢查檔案傳輸權限後重試。</string>
     <string name="ui_transfer_upload_unavailable">電腦暫時無法接收檔案（%1$d）。請檢查電腦連線後重試。</string>
@@ -167,4 +181,44 @@
     <string name="ui_permission_settings">前往設定</string>
     <string name="ui_pair_again">重新配對</string>
     <string name="ui_pair_again_explanation">將清除此手機上的配對憑證，並保留這台電腦。再次連線時，需要輸入電腦上顯示的配對碼。</string>
+    <plurals name="ui_batch_partially_sent">
+        <item quantity="other">已傳送 %1$d/%2$d 個檔案。%3$s</item>
+    </plurals>
+    <string name="ui_previous_transfer_interrupted">上次傳輸未正常結束，請檢查接收檔案後重新選擇重試。</string>
+    <string name="ui_unfinished_download_changed">檔案已變更，請重新整理並核對後重試。</string>
+    <string name="ui_unfinished_download_remove_failed">無法移除檔案，請檢查目錄存取權限後重試。</string>
+    <string name="ui_share_pending">待傳送 · %1$d</string>
+    <string name="ui_share_clear">清空</string>
+    <string name="ui_share_retry">重新讀取</string>
+    <string name="ui_share_reading">正在讀取檔案…</string>
+    <string name="ui_share_connect_first">請選擇電腦並取得檔案權限，然後確認傳送。</string>
+    <string name="ui_share_invalid">未收到有效檔案。請從相簿或檔案管理員分享檔案，每次最多 16 個。</string>
+    <string name="ui_share_unreadable">無法讀取此檔案，請重新讀取，或從來源應用程式重新分享。</string>
+    <string name="ui_share_file_changed">檔案已變更，請重新選擇後傳送。</string>
+    <string name="ui_share_not_started">未能開始傳輸，請等待目前傳輸結束後重試。</string>
+    <string name="ui_usb_connection_expired">USB 連線已失效，請在電腦「偏好設定 → USB 有線連線」中重新連接手機</string>
+    <string name="ui_usb_connection_expired_status">USB 連線已失效</string>
+    <string name="ui_microphone_background_denied">系統無法保持麥克風運作，請返回應用程式後重新開始收音。</string>
+    <string name="ui_transfer_pairing_expired">配對已失效，請重新連線電腦並配對後再傳輸檔案。</string>
+    <string name="ui_transfer_permission_denied">檔案權限已關閉，請在電腦端的裝置權限中開啟檔案傳輸，然後重試。</string>
+    <string name="ui_upload_result_unconfirmed">已停止傳送，電腦儲存結果尚未確認。請先檢查電腦接收目錄，再決定是否重新傳送此檔案。</string>
+    <plurals name="ui_upload_partial_unconfirmed">
+        <item quantity="other">電腦已確認儲存 %1$d/%2$d 個檔案。%3$s</item>
+    </plurals>
+    <plurals name="ui_upload_cancelled_partial">
+        <item quantity="other">已停止傳送，電腦已儲存 %1$d/%2$d 個檔案。</item>
+    </plurals>
+    <plurals name="ui_upload_cancel_completed">
+        <item quantity="other">取消完成前，電腦已儲存 %1$d 個檔案。</item>
+    </plurals>
+    <string name="ui_file_provider_busy">此檔案位置仍在處理上一次操作。可先選擇其他位置的檔案，或稍後重試。</string>
+    <string name="ui_file_provider_slow">檔案位置暫時沒有回應，正在停止本次傳送…</string>
+    <string name="ui_download_result_unconfirmed">已停止等待檔案操作，儲存結果尚未確認。請先檢查所選的 Android 目錄，再決定是否重試。</string>
+    <string name="ui_file_provider_stopped">已取消傳送。此檔案位置仍在回應，可先選擇其他位置，或稍後重試。</string>
+    <string name="ui_connection_recovery_searching">正在尋找這台電腦…</string>
+    <string name="ui_connection_recovery_not_found">未找到可恢復的電腦連線，請確認電腦服務已開啟且位於同一網路。</string>
+    <string name="ui_connection_recovery_busy">請先停止收音並等待檔案傳輸結束，再恢復連線。</string>
+    <string name="ui_connection_recovery_unavailable">目前連線無法自動恢復，請返回電腦清單重新連線。</string>
+    <string name="ui_connection_recovery_cancelled">已停止尋找，原連線資訊已保留。</string>
+    <string name="ui_could_not_open_background_settings">請在系統設定中允許羽連在背景執行。</string>
 </resources>

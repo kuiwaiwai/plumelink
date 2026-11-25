@@ -2,6 +2,7 @@ import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { prepareUsbComponent } from "./prepare-usb.mjs";
 
 const sharedTexts = new Map();
 const sharedList = [];
@@ -40,6 +41,9 @@ const SKIP_JS = new Set([
 ]);
 
 const entries = [];
+await prepareUsbComponent();
+const usb = JSON.parse(await readFile(new URL('./usb-component.json', import.meta.url), 'utf8'));
+entries.push(`Android Debug Bridge ${usb.version} / AdbWinApi / AdbWinUsbApi (Apache-2.0 and bundled notices)\nhttps://android.googlesource.com/platform/packages/modules/adb/\n${refLicenseText(await readFile('tauri-dist/usb/NOTICE.txt', 'utf8'))}`);
 
 const seenJs = new Set();
 async function collectJs(name, parent = process.cwd()) {

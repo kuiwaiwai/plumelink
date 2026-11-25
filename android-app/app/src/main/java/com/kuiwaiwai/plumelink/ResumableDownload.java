@@ -2,7 +2,6 @@ package com.kuiwaiwai.plumelink;
 
 import android.content.ContentResolver;
 import android.net.Uri;
-import android.provider.DocumentsContract;
 import android.webkit.MimeTypeMap;
 import java.io.*;
 import java.util.Locale;
@@ -16,8 +15,15 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 
 final class ResumableDownload {
+    static final class Unconfirmed extends TransferFailure {
+        Unconfirmed() { super(R.string.ui_download_result_unconfirmed); }
+    }
     interface Progress { void update(int percent); }
     static final long MAX_BYTES = 2L * 1024 * 1024 * 1024;
+    static int rejectionReason(int status) {
+        return status == 401 ? R.string.ui_transfer_pairing_expired
+            : status == 403 ? R.string.ui_transfer_permission_denied : R.string.ui_transfer_download_rejected;
+    }
     private static final class Permanent extends TransferFailure {
         Permanent(int reason, Object... arguments) { super(reason, arguments); }
     }
@@ -31,11 +37,27 @@ final class ResumableDownload {
         return "application/octet-stream";
     }
     static void save(ContentResolver resolver, PinnedConnections network, String url, String token, String treeValue,
-            String name, AtomicBoolean cancelled, AtomicReference<Closeable> active, Progress progress) throws Exception {
-        Uri parent = ReceiveDirectory.writableDocument(resolver, treeValue);
+            String name, AtomicBoolean cancelled, AtomicReference<Closeable> active, Progress progress, PendingDownloads pending, String origin, String task) throws Exception {
+        save(resolver,network,url,token,treeValue,name,cancelled,active,progress,pending,origin,task,"");
+    }
+    static void save(ContentResolver resolver, PinnedConnections network, String url, String token, String treeValue,
+            String name, AtomicBoolean cancelled, AtomicReference<Closeable> active, Progress progress, PendingDownloads pending, String origin, String task, String owner) throws Exception {
+        save(resolver,network,url,token,treeValue,name,cancelled,active,progress,pending,origin,task,owner,null);
+    }
+    private static <T> T provider(TransferTask task, TransferTask.Io<T> operation) throws Exception {
+        return task == null ? operation.run() : task.provider(operation);
+    }
+    private static void close(TransferTask task, OutputStream stream) throws Exception {
+        if (stream == null) return;
+        if (task == null) stream.close();
+        else task.cleanup(() -> { stream.close(); return null; });
+    }
+    static void save(ContentResolver resolver, PinnedConnections network, String url, String token, String treeValue,
+            String name, AtomicBoolean cancelled, AtomicReference<Closeable> active, Progress progress, PendingDownloads pending, String origin, String task, String owner, TransferTask work) throws Exception {
+        Uri parent = provider(work, () -> ReceiveDirectory.writableDocument(resolver, treeValue));
         if (parent == null) throw new Permanent(R.string.ui_android_download_folder_unavailable);
         OkHttpClient client = network.transferClient().newBuilder().readTimeout(90, TimeUnit.SECONDS).build();
-        Uri created = null; OutputStream output = null;
+        PendingDownloads.Target destination = null; OutputStream output = null;
         long total = 0, expected = -1, began = android.os.SystemClock.elapsedRealtime(), lastProgress = 0, progressSinceRetry = 0;
         String etag = null; int failures = 0;
         try {
@@ -56,8 +78,9 @@ final class ResumableDownload {
                 try (Response response = call.execute()) {
                     int status = response.code();
                     if (status != (expected < 0 ? 200 : 206)) {
+                        if (status == 410) throw new Permanent(R.string.ui_usb_connection_expired);
                         if (status == 429 || status >= 500) throw new IOException("Retryable HTTP status " + status);
-                        throw new Permanent(R.string.ui_transfer_download_rejected, status);
+                        throw new Permanent(rejectionReason(status), status);
                     }
                     ResponseBody body = response.body();
                     if (body == null) throw new EOFException("Missing download body");
@@ -71,8 +94,10 @@ final class ResumableDownload {
                             etag = "";
                         }
                         try {
-                            created = DocumentsContract.createDocument(resolver, parent, inferMimeType(name), name);
-                            if (created != null) output = resolver.openOutputStream(created, "w");
+                            destination = pending.prepare(origin, treeValue, name, expected, task, owner);
+                            PendingDownloads.Target target = destination;
+                            output = provider(work, () -> target.open(resolver, parent, inferMimeType(name), cancelled::get));
+                            if (work != null) work.local.set(output);
                         } catch (FileNotFoundException | SecurityException | IllegalArgumentException e) {
                             throw new Permanent(R.string.ui_transfer_destination_unwritable);
                         }
@@ -89,7 +114,10 @@ final class ResumableDownload {
                             if (android.os.SystemClock.elapsedRealtime() - began > 2 * 60 * 60 * 1000L) throw new Permanent(R.string.ui_transfer_timeout);
                             int count = input.read(buffer, 0, (int)Math.min(buffer.length, expected - total));
                             if (count < 0) throw new EOFException("Incomplete download body");
-                            try { output.write(buffer, 0, count); } catch (IOException e) { throw new Permanent(R.string.ui_transfer_destination_unwritable); }
+                            try {
+                                OutputStream target = output;
+                                provider(work, () -> { if (cancelled.get()) throw new Permanent(R.string.ui_transfer_canceled); target.write(buffer, 0, count); return null; });
+                            } catch (IOException e) { throw new Permanent(R.string.ui_transfer_destination_unwritable); }
                             total += count;
                             progressSinceRetry += count;
                             if (progressSinceRetry >= 262_144) {
@@ -110,17 +138,30 @@ final class ResumableDownload {
             }
             if (cancelled.get()) throw new Permanent(R.string.ui_transfer_canceled);
             try {
-                output.flush();
-                output.close();
+                OutputStream target = output;
+                provider(work, () -> { target.flush(); return null; });
+                close(work,output);
                 output = null;
             } catch (IOException e) {
                 throw new Permanent(R.string.ui_transfer_destination_unwritable);
             }
+            if (cancelled.get()) throw new Permanent(R.string.ui_transfer_canceled);
+            PendingDownloads.Target target = destination;
+            provider(work, () -> { target.publish(cancelled::get); return null; });
             progress.update(100);
         } catch (Exception e) {
-            if (output != null) try { output.close(); } catch (IOException ignored) {} output = null;
-            if (created != null) try { DocumentsContract.deleteDocument(resolver, created); } catch (Exception ignored) {}
+            if (output != null) try { close(work,output); } catch (Exception ignored) {} output = null;
+            if (destination != null) {
+                PendingDownloads.Target target = destination;
+                if (work == null) target.abort();
+                else work.cleanup(() -> { target.abort(); return null; });
+            }
+            if (destination != null && destination.outcomeUnconfirmed()) throw new Unconfirmed();
             throw e;
-        } finally { if (output != null) try { output.close(); } catch (IOException ignored) {} }
+        } finally {
+            if (output != null) try { close(work,output); } catch (Exception ignored) {}
+            if (work != null) work.local.set(null);
+            if (destination != null) destination.release();
+        }
     }
 }

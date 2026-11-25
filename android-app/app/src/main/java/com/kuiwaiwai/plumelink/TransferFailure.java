@@ -13,6 +13,7 @@ class TransferFailure extends IOException {
         this.reason = reason;
         this.arguments = arguments;
     }
+    int reason() { return reason; }
 
     String message(Context context) {
         String template = AppLanguage.text(context, reason);

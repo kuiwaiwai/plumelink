@@ -1,8 +1,13 @@
 import type { TouchContact } from "../gestures";
 
 export type NativeControl = {
-  kind: "button" | "text" | "heading" | "row" | "column" | "strip" | "switch" | "slider" | "pad" | "dpad" | "mic" | "edit" | "progress" | "window";
+  kind: "button" | "action-row" | "text" | "notice" | "heading" | "row" | "column" | "strip" | "switch" | "slider" | "pad" | "dpad" | "mic" | "edit" | "progress" | "window";
+  disclosure?: boolean;
+  groupStart?: boolean;
+  tone?: "error" | "success" | "neutral";
   id: string;
+  actionId?: string;
+  submitAction?: string;
   label?: string;
   detail?: string;
   icon?: string;
@@ -13,8 +18,13 @@ export type NativeControl = {
   value?: string | number | boolean;
   revision?: number;
   enabled?: boolean;
+  maxLines?: number;
   children?: NativeControl[];
 };
+
+export function recoveryActionId(action: "keep" | "delete" | "confirm-delete" | "cancel-delete" | "expand" | "collapse", file: { id: string; version: string }) {
+  return "unfinished-" + action + "-" + file.id + "-" + file.version;
+}
 
 export const text = (id: string, label: string): NativeControl => ({ kind: "text", id, label });
 export const heading = (id: string, label: string): NativeControl => ({ kind: "heading", id, label });

@@ -552,6 +552,7 @@ pub fn elevated_command(command: &Command) -> bool {
             | Command::Scroll { .. }
             | Command::Key { .. }
             | Command::Combo { .. }
+            | Command::Media { .. }
             | Command::Switch { .. }
             | Command::Desktop { .. }
             | Command::Taskview { .. }
@@ -793,6 +794,8 @@ mod tests {
     fn high_integrity_command_allowlist() {
         assert!(elevated_command(&Command::Move { dx: 1, dy: 0 }));
         assert!(elevated_command(&Command::Text { text: "ok".into() }));
+        assert!(elevated_command(&Command::Media { action: crate::protocol::Media::Playpause }));
+        assert!(!elevated_command(&Command::Launch { id: "a".repeat(32), request: None }));
         assert!(!elevated_command(&Command::Shutdown { confirmed: true }));
         assert!(!elevated_command(&Command::Magnifier { enabled: true }));
         assert!(!elevated_command(&Command::Volume {

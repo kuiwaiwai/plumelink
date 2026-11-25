@@ -55,7 +55,7 @@ import org.json.JSONObject;
 
 /** Android views for the remote workspace. The existing session delivers state and receives actions. */
 final class NativeRemoteUi {
-    private static final int SHEET_GUTTER_DP = 20;
+    private static final int SHEET_GUTTER_DP = UiStyle.SHEET_GUTTER;
     private static final int MORE_GAP_DP = 8;
     private static final int MORE_TILE_PADDING_DP = 6;
     private static final int MORE_TILE_TEXT_SP = 12;
@@ -70,9 +70,10 @@ final class NativeRemoteUi {
     private final FrameLayout root;
     private final FrameLayout pageFrame;
     private final Host host;
+    private final HardwareVolumeKeys volumeKeys = new HardwareVolumeKeys((id, down) -> emit(id, down));
     private final LinearLayout screen, page, content, navigation;
     private final WorkspaceHeader header;
-    private final LinearLayout headerActions;
+    private final LinearLayout headerActions, headerLeading;
     private final ImageButton headerFocus;
     private final FrameLayout headerBack;
     private final ImageView headerBackIcon;
@@ -83,22 +84,35 @@ final class NativeRemoteUi {
     private PopupWindow permissionHint;
     private SheetLayout sheetLayout;
     private LinearLayout sheetContent;
+    private LinearLayout sheetToolbar;
+    private LinearLayout sheetFooter;
+    private LinearLayout sheetHeader, sheetHeaderActions;
     private ScrollView sheetScroll;
     private TextView sheetTitle;
     private View handle;
     private boolean compactMoreSheet;
     private String sheetKey = "";
+    private String sheetAction = "";
+    private String screenAction = "";
     private JSONObject latest;
     private JSONObject microphoneState = new JSONObject();
     private final NativeMicrophoneUi microphoneUi;
     private final NativeMicrophoneUi.HeaderStatus microphoneStatus;
     private int viewportHeight;
-    private boolean shortKeyboard;
+    private boolean shortKeyboard, shortFileSearch, keyboardVisible;
     private NativeMicrophoneUi.Capsule microphoneCapsule;
     private final java.util.WeakHashMap<View, String> appliedState = new java.util.WeakHashMap<>();
+    private final java.util.WeakHashMap<View, String> boundActions = new java.util.WeakHashMap<>();
     private boolean dark, wide, tabletWide, compact, editing;
+    private boolean destroyed;
     private boolean filesTwoPane;
+    private final java.util.Map<String, Integer> filePaneScroll = new java.util.HashMap<>();
     private int pageGutter = 16;
+    private String windowTouchOwner = "", windowRowsKey = "", windowFilterKey = "";
+    private boolean windowPointerDown;
+    private boolean windowSearchNeedsReveal;
+    private java.util.List<WindowAnchor> windowAnchors;
+    private final Runnable windowSettled = this::finishWindowTouch;
 
     NativeRemoteUi(Activity activity, FrameLayout root, Host host) {
         this.activity = activity;
@@ -108,6 +122,12 @@ final class NativeRemoteUi {
         screen = column();
         page = new LinearLayout(activity) {
             @Override protected void onMeasure(int width, int height) {
+                shortFileSearch = keyboardVisible && "files".equals(content.getTag())
+                    && MeasureSpec.getSize(height) < dp(200);
+                if (header.getParent() == this) header.setVisibility(shortFileSearch ? View.GONE : View.VISIBLE);
+                if ("files".equals(content.getTag()))
+                    content.setPadding(content.getPaddingLeft(), content.getPaddingTop(), content.getPaddingRight(),
+                        dp(shortFileSearch ? 4 : tabletWide ? pageGutter : 24));
                 boolean shortEntry = "keyboard".equals(content.getTag()) && MeasureSpec.getSize(width) >= dp(480)
                     && MeasureSpec.getSize(height) < dp(200);
                 if (shortKeyboard != shortEntry) configureKeyboardViewport(shortEntry);
@@ -120,6 +140,8 @@ final class NativeRemoteUi {
         screen.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         header = new WorkspaceHeader();
         header.setGravity(Gravity.CENTER_VERTICAL);
+        headerLeading = new LinearLayout(activity);
+        headerLeading.setGravity(Gravity.CENTER_VERTICAL);
         headerBack = new FrameLayout(activity);
         headerBack.setBackground(ripple(Color.TRANSPARENT, 24));
         headerBack.setFocusable(true);
@@ -127,7 +149,9 @@ final class NativeRemoteUi {
         headerBack.setOnClickListener(v -> emit("back-remote", null));
         headerBackIcon = new ImageView(activity);
         headerBack.addView(headerBackIcon, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
-        header.addView(headerBack, 0, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        backParams.setMarginEnd(dp(4));
+        headerLeading.addView(headerBack, backParams);
         headerBack.setVisibility(View.GONE);
         LinearLayout identity = column();
         title = label(26);
@@ -152,7 +176,8 @@ final class NativeRemoteUi {
         identityRow.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
         identityRow.addView(microphoneStatus.stopButton(), new LinearLayout.LayoutParams(dp(48), dp(48)));
         microphoneStatus.stopButton().setVisibility(View.GONE);
-        header.addView(identityRow, new LinearLayout.LayoutParams(0, -2, 1));
+        headerLeading.addView(identityRow, new LinearLayout.LayoutParams(0, -2, 1));
+        header.addView(headerLeading, new LinearLayout.LayoutParams(0, -2, 1));
         headerActions = new LinearLayout(activity);
         headerActions.setGravity(Gravity.CENTER_VERTICAL);
         headerFocus = new ImageButton(activity);
@@ -164,22 +189,50 @@ final class NativeRemoteUi {
         header.addView(headerActions, new LinearLayout.LayoutParams(-2, -2));
         page.addView(header);
         scroll = new ScrollView(activity) {
+            private int lastWidth, lastHeight;
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) beginWindowTouch();
+                try { return super.dispatchTouchEvent(event); }
+                finally {
+                    if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                        windowPointerDown = false;
+                        settleWindowTouch();
+                    }
+                }
+            }
             @Override protected void onMeasure(int width, int height) {
                 viewportHeight = MeasureSpec.getSize(height);
                 super.onMeasure(width, height);
             }
+            @Override protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+                super.onLayout(changed, left, top, right, bottom);
+                restoreWindowAnchor();
+                boolean resized = lastWidth != getWidth() || lastHeight != getHeight();
+                lastWidth = getWidth(); lastHeight = getHeight();
+                revealWindowSearch(resized);
+            }
         };
-        scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> placeMicrophoneCapsule());
+        scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> { placeMicrophoneCapsule(); settleWindowTouch(); });
         scroll.setFillViewport(true);
-        content = column();
+        content = new LinearLayout(activity) {
+            @Override protected void onMeasure(int width, int height) {
+                if (filesTwoPane && "files".equals(getTag()))
+                    height = MeasureSpec.makeMeasureSpec(viewportHeight, MeasureSpec.EXACTLY);
+                super.onMeasure(width, height);
+            }
+        };
+        content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(16), dp(4), dp(16), dp(8));
         scroll.addView(content);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         feedback = label(14);
         feedback.setPadding(dp(16), dp(10), dp(16), dp(10));
+        feedback.setMinimumHeight(dp(48));
+        feedback.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         feedback.setMaxWidth(dp(480));
         feedback.setVisibility(View.GONE);
         feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        feedback.setOnClickListener(v -> emit("dismiss-feedback", null));
         FrameLayout.LayoutParams feedbackParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         feedbackParams.setMargins(dp(16), 0, dp(16), dp(12));
         pageFrame.addView(feedback, feedbackParams);
@@ -207,6 +260,11 @@ final class NativeRemoteUi {
                 }
                 int widthDp = Math.round(windowWidth / density);
                 int heightDp = Math.round(windowHeight / density);
+                if (Build.VERSION.SDK_INT < 30) {
+                    android.content.res.Configuration configuration = activity.getResources().getConfiguration();
+                    if (configuration.screenWidthDp > 0) widthDp = configuration.screenWidthDp;
+                    if (configuration.screenHeightDp > 0) heightDp = configuration.screenHeightDp;
+                }
                 AdaptiveLayout.Workspace workspace = AdaptiveLayout.workspace(widthDp, heightDp);
                 boolean landscape = workspace != AdaptiveLayout.Workspace.STACKED;
                 boolean tablet = workspace == AdaptiveLayout.Workspace.TWO_PANE;
@@ -214,6 +272,7 @@ final class NativeRemoteUi {
                 int gutter = AdaptiveLayout.pageGutterDp(widthDp, workspace);
                 boolean splitFiles = landscape || AdaptiveLayout.fittingColumns(widthDp - 2 * gutter, 20, 320, 2) == 2;
                 if (wide != landscape || tabletWide != tablet || compact != shortPortrait || pageGutter != gutter || filesTwoPane != splitFiles) screen.post(() -> {
+                    if (destroyed) return;
                     boolean structureChanged = wide != landscape || tabletWide != tablet || compact != shortPortrait;
                     if (!structureChanged && pageGutter == gutter && filesTwoPane == splitFiles) return;
                     filesTwoPane = splitFiles;
@@ -243,6 +302,7 @@ final class NativeRemoteUi {
         private String connectionLabel = "";
         private CharSequence connectionWithLatency = "";
         private String chipStyle;
+        private TextView styledChip;
         private boolean chipTextDirty;
 
         WorkspaceHeader() { super(activity); }
@@ -250,20 +310,21 @@ final class NativeRemoteUi {
         @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
             if (shortKeyboard) {
                 setOrientation(HORIZONTAL);
-                LayoutParams identity = (LayoutParams) getChildAt(1).getLayoutParams();
+                LayoutParams identity = (LayoutParams) headerLeading.getLayoutParams();
                 identity.width = 0;
                 identity.weight = 1;
             } else if (headerActions.getChildCount() > 1) {
                 TextView chip = (TextView) headerActions.getChildAt(0);
                 int backWidth = headerBack.getVisibility() == View.VISIBLE ? dp(48) + dp(4) : 0;
-                int available = Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - getPaddingStart() - getPaddingEnd() - backWidth);
+                int available = Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - getPaddingStart() - getPaddingEnd());
                 int gap = dp(8);
                 int identityWidth = (int) Math.ceil(Layout.getDesiredWidth(title.getText(), title.getPaint()));
                 int subtitleWidth = (int) Math.ceil(Layout.getDesiredWidth(subtitle.getText(), subtitle.getPaint()));
                 int chipPadding = chip.getCompoundPaddingStart() + chip.getCompoundPaddingEnd();
                 int statusWidth = chipPadding + (int) Math.ceil(Layout.getDesiredWidth(connectionLabel, chip.getPaint()));
                 int fullWidth = chipPadding + (int) Math.ceil(Layout.getDesiredWidth(connectionWithLatency, chip.getPaint()));
-                int leadingWidth = Math.max(dp(128), Math.max(identityWidth, subtitleWidth));
+                int stopWidth = microphoneStatus.stopButton().getVisibility() == VISIBLE ? dp(48) : 0;
+                int leadingWidth = backWidth + stopWidth + Math.max(dp(128), Math.max(identityWidth, subtitleWidth));
                 int actionWidth = headerFocus.getVisibility() == VISIBLE ? dp(48) : 0;
                 boolean beside = AdaptiveLayout.fitsInline(available, leadingWidth, statusWidth + actionWidth, gap);
                 int chipSpace = available - actionWidth - (beside ? leadingWidth + gap : 0);
@@ -277,7 +338,7 @@ final class NativeRemoteUi {
                 int maxLines = beside ? 1 : Integer.MAX_VALUE;
                 if (chip.getMaxLines() != maxLines) chip.setMaxLines(maxLines);
                 setOrientation(beside ? HORIZONTAL : VERTICAL);
-                LayoutParams identity = (LayoutParams) getChildAt(1).getLayoutParams();
+                LayoutParams identity = (LayoutParams) headerLeading.getLayoutParams();
                 identity.width = beside ? 0 : LayoutParams.MATCH_PARENT;
                 identity.weight = beside ? 1 : 0;
                 LayoutParams status = (LayoutParams) headerActions.getLayoutParams();
@@ -286,6 +347,18 @@ final class NativeRemoteUi {
                 status.topMargin = beside ? 0 : gap;
             }
             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+            if (!shortKeyboard && headerActions.getChildCount() > 1) {
+                TextView chip = (TextView) headerActions.getChildAt(0);
+                Layout layout = chip.getLayout();
+                if (chip.getMaxLines() == 1 && layout != null
+                    && !TextUtils.equals(chip.getText(), connectionLabel)
+                    && (layout.getLineCount() != 1 || layout.getLineEnd(0) < chip.length()
+                        || layout.getLineWidth(0) > chip.getMeasuredWidth()
+                            - chip.getCompoundPaddingLeft() - chip.getCompoundPaddingRight() + 1)) {
+                    chip.setText(connectionLabel);
+                    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                }
+            }
         }
     }
 
@@ -335,6 +408,20 @@ final class NativeRemoteUi {
                 child.setLayoutParams(params);
             }
         }
+        updateNavigationVisibility();
+    }
+
+    void setKeyboardVisible(boolean visible) {
+        if (destroyed || keyboardVisible == visible) return;
+        keyboardVisible = visible;
+        updateNavigationVisibility();
+    }
+
+    private void updateNavigationVisibility() {
+        int visibility = navigation.getChildCount() == 0 || (keyboardVisible && !wide) ? View.GONE
+            : latest != null && latest.optBoolean("keepDialPosition") ? View.INVISIBLE : View.VISIBLE;
+        navigation.setVisibility(visibility);
+        navigationRail.setVisibility(visibility);
     }
 
     private int dp(float value) { return Math.round(value * activity.getResources().getDisplayMetrics().density); }
@@ -344,22 +431,159 @@ final class NativeRemoteUi {
         int end = BaseInputConnection.getComposingSpanEnd(text);
         return start >= 0 && end > start;
     }
-    private int ink() { return dark ? 0xffedf0f7 : 0xff1a202c; }
-    private int muted() { return dark ? 0xffa3adbf : 0xff5f6b7e; }
-    private int surface() { return dark ? 0xff1b1e26 : Color.WHITE; }
-    private int tonal() { return dark ? 0xff252a35 : 0xffeceff5; }
-    private int edge() { return dark ? 0xff303642 : 0xffe6e9f0; }
-    private int background() { return dark ? 0xff111318 : 0xfff5f6fa; }
-    private int accent() { return dark ? 0xffa5bdff : 0xff2868e8; }
-    private int accentSoft() { return dark ? 0xff283b62 : 0xffe6edff; }
+    private int ink() { return UiStyle.ink(dark); }
+    private int muted() { return UiStyle.muted(dark); }
+    private int surface() { return UiStyle.surface(dark); }
+    private int tonal() { return UiStyle.tonal(dark); }
+    private int edge() { return UiStyle.edge(dark); }
+    private int background() { return UiStyle.background(dark); }
+    private int accent() { return UiStyle.accent(dark); }
+    private int accentSoft() { return UiStyle.accentSoft(dark); }
     private LinearLayout column() {
         LinearLayout layout = new LinearLayout(activity);
         layout.setOrientation(LinearLayout.VERTICAL);
         return layout;
     }
+    private final class FilePane extends ScrollView {
+        private final String id;
+        private final Rect focusBounds = new Rect();
+        private int restoreY;
+
+        FilePane(String id) {
+            super(activity);
+            this.id = id;
+            restoreY = filePaneScroll.getOrDefault(id, 0);
+            setFillViewport(true);
+            setVerticalScrollBarEnabled(true);
+            setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
+        }
+
+        @Override protected void onScrollChanged(int x, int y, int oldX, int oldY) {
+            super.onScrollChanged(x, y, oldX, oldY);
+            filePaneScroll.put(id, y);
+        }
+
+        @Override protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+            super.onLayout(changed, left, top, right, bottom);
+            if (restoreY >= 0) {
+                int target = restoreY;
+                restoreY = -1;
+                scrollTo(0, target);
+            }
+            View focused = findFocus();
+            if (keyboardVisible && focused instanceof EditText) {
+                focused.getDrawingRect(focusBounds);
+                offsetDescendantRectToMyCoords(focused, focusBounds);
+                int delta = computeScrollDeltaToGetChildRectOnScreen(focusBounds);
+                if (delta != 0) scrollBy(0, delta);
+            }
+        }
+    }
+    private static final class WindowAnchor {
+        final String tag;
+        final int offset;
+        WindowAnchor(String tag, int offset) { this.tag = tag; this.offset = offset; }
+    }
+    private void beginWindowTouch() {
+        if (latest == null || !"windows".equals(latest.optString("destination"))) return;
+        windowAnchors = null;
+        windowSearchNeedsReveal = false;
+        JSONObject actions = latest.optJSONObject("screenActions");
+        String owner = actions == null ? "" : actions.optString("window-interaction");
+        if (owner.isEmpty()) return;
+        scroll.removeCallbacks(windowSettled);
+        windowPointerDown = true;
+        windowTouchOwner = owner;
+        emit(owner, true);
+    }
+    private void settleWindowTouch() {
+        if (windowPointerDown || windowTouchOwner.isEmpty()) return;
+        scroll.removeCallbacks(windowSettled);
+        scroll.postDelayed(windowSettled, 120);
+    }
+    private void finishWindowTouch() {
+        if (windowPointerDown || windowTouchOwner.isEmpty()) return;
+        String owner = windowTouchOwner;
+        windowTouchOwner = "";
+        emit(owner, false);
+        if (windowSearchNeedsReveal) scroll.requestLayout();
+    }
+    private void resetWindowTouch() {
+        scroll.removeCallbacks(windowSettled);
+        windowTouchOwner = ""; windowPointerDown = false; windowAnchors = null; windowSearchNeedsReveal = false;
+    }
+    private String windowRowsKey(JSONArray items) {
+        StringBuilder key = new StringBuilder();
+        if (items != null) for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null || !"window".equals(item.optString("kind"))) continue;
+            for (String field : new String[]{"id", "label", "detail"}) {
+                String value = item.optString(field);
+                key.append(value.length()).append(':').append(value);
+            }
+        }
+        return key.toString();
+    }
+    private String windowSearchKey(JSONArray items) {
+        if (items != null) for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null || !"windows-search".equals(item.optString("id"))) continue;
+            JSONArray children = item.optJSONArray("children");
+            if (children != null) for (int j = 0; j < children.length(); j++) {
+                JSONObject child = children.optJSONObject(j);
+                if (child != null && "window-filter".equals(child.optString("id"))) return "search:" + child.optString("value");
+            }
+        }
+        return "";
+    }
+    private void hideWindowSearch() {
+        View edit = content.findViewWithTag("edit:window-filter");
+        if (edit == null) return;
+        ((android.view.inputmethod.InputMethodManager) activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE))
+            .hideSoftInputFromWindow(edit.getWindowToken(), 0);
+        edit.clearFocus();
+    }
+    private void revealWindowSearch(boolean resized) {
+        if (!windowSearchNeedsReveal && !resized) return;
+        View edit = content.findViewWithTag("edit:window-filter");
+        if (!"windows".equals(content.getTag()) || edit == null || !edit.hasFocus()) {
+            windowSearchNeedsReveal = false;
+            return;
+        }
+        if (!windowTouchOwner.isEmpty()) { windowSearchNeedsReveal = true; return; }
+        windowSearchNeedsReveal = false;
+        Rect area = new Rect();
+        edit.getDrawingRect(area);
+        area.bottom += dp(4);
+        edit.requestRectangleOnScreen(area, true);
+    }
+    private void prepareWindowAnchor(JSONArray items) {
+        String key = windowRowsKey(items);
+        if (!key.equals(windowRowsKey) && windowTouchOwner.isEmpty() && windowAnchors == null && scroll.getScrollY() > 0) {
+            windowAnchors = new java.util.ArrayList<>();
+            for (int i = 0; i < content.getChildCount(); i++) {
+                View child = content.getChildAt(i);
+                String tag = String.valueOf(child.getTag());
+                if (tag.startsWith("window:window-") && child.getBottom() > scroll.getScrollY())
+                    windowAnchors.add(new WindowAnchor(tag, child.getTop() - scroll.getScrollY()));
+            }
+        }
+        windowRowsKey = key;
+    }
+    private void restoreWindowAnchor() {
+        java.util.List<WindowAnchor> anchors = windowAnchors;
+        windowAnchors = null;
+        if (anchors == null || !windowTouchOwner.isEmpty() || !"windows".equals(content.getTag())) return;
+        for (WindowAnchor anchor : anchors) {
+            View child = content.findViewWithTag(anchor.tag);
+            if (child != null) { scroll.scrollTo(0, child.getTop() - anchor.offset); break; }
+        }
+    }
     private TextView label(int size) {
         TextView view = new TextView(activity);
         view.setTextSize(size);
+        view.setIncludeFontPadding(false);
+        view.setLetterSpacing(0);
         return view;
     }
     private GradientDrawable shape(int color, int radius) {
@@ -372,13 +596,7 @@ final class NativeRemoteUi {
         return ripple(color, 16);
     }
     private RippleDrawable ripple(int color, int radius) {
-        int pressed = dark ? 0x30ffffff : 0x240051dc;
-        int focused = dark ? 0x28a5bdff : 0x202868e8;
-        int hover = dark ? 0x1affffff : 0x142868e8;
-        ColorStateList states = new ColorStateList(new int[][]{
-            {android.R.attr.state_pressed}, {android.R.attr.state_focused}, {android.R.attr.state_hovered}, {}
-        }, new int[]{pressed, focused, hover, pressed});
-        return new RippleDrawable(states, shape(color, radius), shape(Color.WHITE, radius));
+        return UiStyle.ripple(activity, dark, color, radius);
     }
     private void setText(TextView view, String value) {
         if (!value.contentEquals(view.getText())) view.setText(value);
@@ -395,9 +613,22 @@ final class NativeRemoteUi {
         if (Build.VERSION.SDK_INT >= 28) view.setAccessibilityHeading(true);
     }
     private void emit(String id, Object value) {
-        if ("send".equals(id) || "pair".equals(id)) {
-            String field = "send".equals(id) ? "edit:draft" : "edit:code";
-            View host = sheetContent != null ? sheetContent : content;
+        if (destroyed) return;
+        int marker = id.lastIndexOf(":sheet:");
+        if (marker >= 0) {
+            int current = sheetAction.lastIndexOf(":sheet:");
+            if (current < 0 || !id.substring(marker).equals(sheetAction.substring(current))) return;
+        } else {
+            marker = id.lastIndexOf(":screen:");
+            int current = screenAction.lastIndexOf(":screen:");
+            if (marker < 0 || current < 0 || !id.substring(marker).equals(screenAction.substring(current))) return;
+            String logical = id.substring(0, marker);
+            if (!sheetKey.isEmpty() && !(value instanceof JSONObject && ("draft".equals(logical) || "file-filter".equals(logical)))) return;
+        }
+        String logical = marker < 0 ? id : id.substring(0, marker);
+        if ("send".equals(logical) || "pair".equals(logical)) {
+            String field = "send".equals(logical) ? "edit:draft" : "edit:code";
+            View host = !sheetKey.isEmpty() && sheetContent != null ? sheetContent : content;
             SessionEdit edit = host.findViewWithTag(field);
             if (edit != null && hasComposingText(edit.getText())) {
                 Toast.makeText(activity, AppLanguage.text(activity, R.string.ui_confirm_input_candidate_first), Toast.LENGTH_SHORT).show();
@@ -407,12 +638,42 @@ final class NativeRemoteUi {
         host.action(id, value);
     }
 
+    boolean volumeKey(KeyEvent event) {
+        int key = event.getKeyCode();
+        if (key != KeyEvent.KEYCODE_VOLUME_UP && key != KeyEvent.KEYCODE_VOLUME_DOWN) return false;
+        if (event.getAction() == KeyEvent.ACTION_UP) return volumeKeys.up(key);
+        if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+        JSONObject actions = latest == null ? null : latest.optJSONObject("screenActions");
+        boolean enabled = !destroyed && screen.getVisibility() == View.VISIBLE && activity.hasWindowFocus()
+            && latest != null && latest.optBoolean("hardwareVolume") && !event.isCanceled();
+        String id = enabled && actions != null ? actions.optString("hardware-volume-" + (key == KeyEvent.KEYCODE_VOLUME_UP ? "up" : "down")) : "";
+        return volumeKeys.down(key, event.getRepeatCount() > 0, id);
+    }
+
+    void cancelVolumeKeys() { volumeKeys.cancel(); }
+    void releaseVolumeKeys() { volumeKeys.reset(); }
+
     void render(JSONObject state) {
-        if (activity.isFinishing() || activity.isDestroyed()) return;
+        if (destroyed || activity.isFinishing() || activity.isDestroyed()) return;
         boolean nextDark = state.optBoolean("dark");
         boolean themeChanged = latest == null || dark != nextDark;
         latest = state;
+        if (!state.optBoolean("hardwareVolume")) volumeKeys.cancel();
         dark = nextDark;
+        JSONObject screenActions = state.optJSONObject("screenActions");
+        if (screenActions != null) {
+            String owner = screenActions.optString("back-remote");
+            if (!owner.equals(screenAction)) {
+                screenAction = owner;
+                headerBack.setOnClickListener(v -> emit(owner, null));
+                String focusAction = screenActions.optString("focus");
+                headerFocus.setOnClickListener(v -> emit(focusAction, null));
+                String stopAction = screenActions.optString("mic-stop");
+                microphoneStatus.stopButton().setOnClickListener(v -> emit(stopAction, null));
+                String feedbackAction = screenActions.optString("dismiss-feedback");
+                feedback.setOnClickListener(v -> emit(feedbackAction, null));
+            }
+        }
         if (themeChanged) {
             screen.setBackgroundColor(background());
             title.setTextColor(ink());
@@ -433,6 +694,8 @@ final class NativeRemoteUi {
         setText(subtitle, state.optString("subtitle", ""));
         JSONObject connection = state.optJSONObject("connection");
         if (connection != null) {
+            if (headerActions.getChildCount() > 1 && !java.util.Objects.equals(connection.optString("actionId", connection.optString("id")), boundActions.get(headerActions.getChildAt(0))))
+                headerActions.removeViewAt(0);
             if (headerActions.getChildCount() == 1) headerActions.addView(create(connection, headerActions), 0, new LinearLayout.LayoutParams(-2, -2));
             update(headerActions.getChildAt(0), connection);
         }
@@ -445,6 +708,13 @@ final class NativeRemoteUi {
         headerBack.setContentDescription(AppLanguage.text(activity, R.string.ui_back_to_remote));
         int gutter = pageGutter;
         if (!dest.equals(content.getTag())) {
+            View focused = content.findFocus();
+            if (focused instanceof EditText) {
+                ((android.view.inputmethod.InputMethodManager) activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE))
+                    .hideSoftInputFromWindow(focused.getWindowToken(), 0);
+                focused.clearFocus();
+            }
+            filePaneScroll.clear();
             content.setTag(dest);
             scroll.scrollTo(0, 0);
         }
@@ -465,14 +735,44 @@ final class NativeRemoteUi {
         header.setPadding(dp(headerInset), headerVertical, dp(shortKeyboard ? 0 : headerInset), headerVertical);
         content.setPadding(dp(gutter), dp(splitPad ? 8 : "remote".equals(dest) ? 0 : 4), dp(gutter),
             dp(tabletWide ? gutter : "remote".equals(dest) ? 8 : 24));
+        boolean focusWindowSearch = false;
+        if ("windows".equals(dest)) {
+            JSONObject actions = state.optJSONObject("screenActions");
+            if (!windowTouchOwner.isEmpty() && (actions == null || !windowTouchOwner.equals(actions.optString("window-interaction")))) resetWindowTouch();
+            String filterKey = windowSearchKey(controls);
+            if (!filterKey.equals(windowFilterKey)) {
+                if (filterKey.isEmpty()) hideWindowSearch();
+                else focusWindowSearch = windowFilterKey.isEmpty();
+                windowFilterKey = filterKey; windowAnchors = null;
+                scroll.scrollTo(0, 0);
+                windowSearchNeedsReveal = !filterKey.isEmpty();
+                if (windowSearchNeedsReveal) scroll.requestLayout();
+            }
+            prepareWindowAnchor(controls);
+        } else { hideWindowSearch(); resetWindowTouch(); windowRowsKey = ""; windowFilterKey = ""; }
         boolean hadTransfer = content.findViewWithTag("column:transfer-card") != null;
         reconcile(content, controls, false);
-        if ("files".equals(dest) && !hadTransfer && content.findViewWithTag("column:transfer-card") != null)
-            scroll.post(() -> scroll.scrollTo(0, 0));
+        if (focusWindowSearch) {
+            View edit = content.findViewWithTag("edit:window-filter");
+            if (edit != null) {
+                edit.requestFocus();
+                edit.post(() -> {
+                    if (edit.isShown() && edit.hasFocus() && activity.hasWindowFocus())
+                        ((android.view.inputmethod.InputMethodManager) activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE))
+                            .showSoftInput(edit, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                });
+            }
+        }
+        boolean splitFiles = "files".equals(dest) && filesTwoPane;
+        scroll.setOverScrollMode(splitFiles ? View.OVER_SCROLL_NEVER : View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        if (splitFiles && scroll.getScrollY() != 0) scroll.scrollTo(0, 0);
+        if ("files".equals(dest) && !hadTransfer && content.findViewWithTag("column:transfer-card") != null) {
+            ScrollView target = splitFiles ? content.findViewWithTag("scroll:file-actions-pane") : scroll;
+            if (target != null) target.post(() -> target.scrollTo(0, 0));
+        }
         reconcile(navigation, state.optJSONArray("nav"), !wide);
         sizeNavigationRail();
-        navigation.setVisibility(navigation.getChildCount() == 0 ? View.GONE : state.optBoolean("keepDialPosition") ? View.INVISIBLE : View.VISIBLE);
-        navigationRail.setVisibility(navigation.getVisibility());
+        updateNavigationVisibility();
         setText(feedback, state.optString("feedback"));
         feedback.setVisibility(feedback.length() > 0 && state.isNull("sheetKey") ? View.VISIBLE : View.GONE);
         if (feedback.getVisibility() == View.VISIBLE) placeFeedback();
@@ -653,10 +953,14 @@ final class NativeRemoteUi {
             else if (sectionContent != null) sectionContent.put(settingItem(item));
         }
         if (tabletWide && result.length() >= 4) {
-            return new JSONArray().put(group("row", "grid-settings-top",
-                new JSONArray().put(result.optJSONObject(0)).put(result.optJSONObject(1))))
-                .put(group("row", "grid-settings-bottom", new JSONArray().put(result.optJSONObject(2)).put(result.optJSONObject(3))))
-                .put(result.optJSONObject(4));
+            JSONArray grid = new JSONArray();
+            for (int i = 0; i < result.length();) {
+                JSONObject first = result.optJSONObject(i), next = result.optJSONObject(i + 1);
+                if (first.optString("id").startsWith("section-") && next != null && next.optString("id").startsWith("section-")) {
+                    grid.put(group("row", "grid-settings-" + i, new JSONArray().put(first).put(next))); i += 2;
+                } else { grid.put(first); i++; }
+            }
+            return grid;
         }
         return result;
     }
@@ -671,7 +975,7 @@ final class NativeRemoteUi {
 
     private JSONArray filesLayout(JSONArray items) {
         JSONArray actions = new JSONArray(), library = new JSONArray(), history = new JSONArray();
-        JSONObject upload = null, receive = null, header = null, progress = null, result = null;
+        JSONObject upload = null, receive = null, header = null, progress = null, result = null, unfinished = null, search = null, order = null;
         boolean inLibrary = false;
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
@@ -685,24 +989,38 @@ final class NativeRemoteUi {
             } else if ("shared".equals(id) && i + 1 < items.length()) {
                 inLibrary = true;
                 header = group("row", "files-header", new JSONArray().put(item).put(items.optJSONObject(++i)));
-            } else if (inLibrary || "files-status".equals(id)) library.put(item);
+            } else if ("files-search".equals(id)) search = item;
+            else if ("file-order".equals(id)) {
+                try {
+                    order = new JSONObject(item.toString()).put("icon", "sort").put("iconOnly", true)
+                        .put("status", item.optString("label") + " · " + item.optString("detail"));
+                } catch (JSONException ignored) {}
+            }
+            else if (inLibrary || "files-status".equals(id)) library.put(item);
             else if (id.startsWith("history-") || "clear-history".equals(id)) history.put(item);
             else if ("transfer-card".equals(id)) progress = item;
             else if ("transfer".equals(id)) result = item;
+            else if ("unfinished".equals(id)) unfinished = item;
             else actions.put(item);
         }
         if (progress != null) actions.put(progress);
+        if (result != null) actions.put(result);
         if (upload != null) actions.put(upload);
         if (receive != null) actions.put(receive);
-        if (result != null) actions.put(result);
+        if (unfinished != null) actions.put(unfinished);
         JSONArray librarySections = new JSONArray();
         if (header != null) librarySections.put(header);
+        if (search != null) librarySections.put(group("row", "file-library-tools",
+            order == null ? new JSONArray().put(search) : new JSONArray().put(search).put(order)));
         if (library.length() > 0) librarySections.put(group("column", "file-library-card", library));
         if (history.length() > 0) (filesTwoPane ? actions : librarySections).put(group("column", "file-history-card", history));
         JSONObject actionColumn = group("column", "file-actions-column", actions);
         JSONObject libraryColumn = group("column", "file-library-column", librarySections);
         JSONArray sections = new JSONArray().put(actionColumn).put(libraryColumn);
-        return filesTwoPane ? new JSONArray().put(group("row", "files-columns", sections)) : sections;
+        if (!filesTwoPane) return sections;
+        return new JSONArray().put(group("row", "files-columns", new JSONArray()
+            .put(group("scroll", "file-actions-pane", new JSONArray().put(actionColumn)))
+            .put(group("scroll", "file-library-pane", new JSONArray().put(libraryColumn)))));
     }
 
     private JSONObject group(String kind, String id, JSONArray children) {
@@ -714,13 +1032,14 @@ final class NativeRemoteUi {
         int count = items == null ? 0 : items.length();
         boolean fileColumn = "column:file-actions-column".equals(parent.getTag())
             || "column:file-library-column".equals(parent.getTag());
-        java.util.HashSet<String> tags = new java.util.HashSet<>();
+        java.util.Map<String, String> tags = new java.util.HashMap<>();
         for (int index = 0; index < count; index++) {
             JSONObject item = items.optJSONObject(index);
-            if (item != null) tags.add(item.optString("kind") + ":" + item.optString("id"));
+            if (item != null) tags.put(item.optString("kind") + ":" + item.optString("id"), item.optString("actionId", item.optString("id")));
         }
         for (int index = parent.getChildCount() - 1; index >= 0; index--) {
-            if (!tags.contains(parent.getChildAt(index).getTag())) parent.removeViewAt(index);
+            View child = parent.getChildAt(index);
+            if (!tags.containsKey(child.getTag()) || !java.util.Objects.equals(tags.get(child.getTag()), boundActions.get(child))) parent.removeViewAt(index);
         }
         for (int index = 0; index < count; index++) {
             JSONObject item = items.optJSONObject(index);
@@ -741,9 +1060,10 @@ final class NativeRemoteUi {
                 applySpacing(layout, parent, item, index, count);
                 parent.addView(view, index, layout);
             }
-            if (fileColumn) {
+            if (fileColumn || parent == sheetContent) {
                 LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) view.getLayoutParams();
-                int gap = index == 0 ? 0 : dp("file-library-card".equals(item.optString("id")) ? 4 : 12);
+                int gap = parent == sheetContent ? sheetTopMargin(item, index)
+                    : index == 0 ? 0 : dp("file-library-card".equals(item.optString("id")) ? 8 : 12);
                 if (lp.topMargin != gap || lp.bottomMargin != 0) {
                     lp.topMargin = gap;
                     lp.bottomMargin = 0;
@@ -755,10 +1075,48 @@ final class NativeRemoteUi {
         while (parent.getChildCount() > count) parent.removeViewAt(parent.getChildCount() - 1);
     }
 
+    private JSONArray customKeyLayout(JSONArray items) {
+        JSONObject preview = null, modifiers = null;
+        JSONArray remaining = new JSONArray();
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            if ("custom-key-preview".equals(item.optString("id"))) preview = item;
+            else if ("custom-modifiers".equals(item.optString("id"))) modifiers = item;
+            else remaining.put(item);
+        }
+        if (preview == null || modifiers == null) return items;
+        JSONArray result = new JSONArray().put(group("row", "custom-topline", new JSONArray().put(preview).put(modifiers)));
+        for (int i = 0; i < remaining.length(); i++) result.put(remaining.opt(i));
+        return result;
+    }
+
+    private int sheetTopMargin(JSONObject item, int index) {
+        if (index == 0) return 0;
+        if ("action-row".equals(item.optString("kind"))) return dp(item.optBoolean("groupStart") ? 14 : 6);
+        if ("heading".equals(item.optString("kind")) && "neutral".equals(item.optString("tone"))) return dp(16);
+        if (item.has("selected")) return dp(6);
+        boolean slots = "more-slots".equals(item.optString("id"));
+        return dp(compactMoreSheet ? (slots ? 8 : 4) : slots ? 18 : "connection".equals(sheetKey) ? 12 : 8);
+    }
+
     private void applySpacing(LinearLayout.LayoutParams layout, LinearLayout parent, JSONObject item, int index, int count) {
         String group = String.valueOf(parent.getTag());
         String id = item.optString("id");
-        if ("strip-items".equals(group)) {
+        if (parent == sheetFooter) {
+            layout.width = -1; layout.height = -2; layout.weight = 0;
+            layout.setMargins(0, index == 0 ? 0 : dp(8), 0, 0);
+            return;
+        }
+        if ("file-pane-content".equals(group)) {
+            layout.setMargins(0, 0, 0, 0);
+        } else if ("row:files-search".equals(group)) {
+            layout.setMargins(0, 0, 0, 0);
+        } else if ("row:file-library-tools".equals(group)) {
+            layout.width = "file-order".equals(id) ? dp(48) : 0;
+            layout.weight = "file-order".equals(id) ? 0 : 1;
+            layout.setMargins("file-order".equals(id) ? dp(8) : 0, 0, 0, 0);
+        } else if ("strip-items".equals(group)) {
             layout.width = -2;
             layout.weight = 0;
             layout.setMargins(index == 0 ? 0 : dp(6), 0, 0, 0);
@@ -799,6 +1157,8 @@ final class NativeRemoteUi {
             layout.setMargins(0, index == 0 ? 0 : dp(8), 0, 0);
         } else if ("column:folder-copy".equals(group)) {
             layout.setMargins(0, index == 0 ? 0 : dp(4), 0, 0);
+        } else if (group.startsWith("column:share-copy-") || group.startsWith("row:share-file-") || "row:share-heading".equals(group)) {
+            layout.setMargins(0, 0, 0, 0);
         } else if (group.startsWith("row:file-")) {
             layout.setMargins(index == 0 ? 0 : dp(8), 0, 0, 0);
         } else if ("column:pad-column".equals(group)) {
@@ -811,10 +1171,14 @@ final class NativeRemoteUi {
             layout.bottomMargin = 0;
         }
         if (parent == sheetContent) {
-            int gap = "more-slots".equals(id) ? 18 : "connection".equals(sheetKey) ? 12 : 8;
-            if (compactMoreSheet) gap = "more-slots".equals(id) ? 8 : 4;
-            layout.topMargin = index == 0 || item.has("selected") ? 0 : dp(gap);
+            layout.topMargin = sheetTopMargin(item, index);
             layout.bottomMargin = 0;
+        }
+        if (parent == sheetHeaderActions) {
+            layout.width = item.optBoolean("iconOnly") ? dp(48) : ViewGroup.LayoutParams.WRAP_CONTENT;
+            layout.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            layout.weight = 0;
+            layout.setMargins(dp(4), 0, 0, 0);
         }
         if (parent == content && "file-library-column".equals(id)) layout.topMargin = dp(16);
         if (parent == content && "remote".equals(parent.getTag())) {
@@ -829,11 +1193,14 @@ final class NativeRemoteUi {
 
     private LinearLayout.LayoutParams params(JSONObject item, boolean horizontal) {
         String id = item.optString("id");
-        boolean grows = "pad".equals(id) || "dpad".equals(id) || "landscape".equals(id) || "pad-column".equals(id);
-        float columnWeight = "pad-column".equals(id) ? (tabletWide ? 1.65f : 1.1f) : "file-library-column".equals(id) ? 1.16f : 1f;
+        boolean grows = "pad".equals(id) || "dpad".equals(id) || "landscape".equals(id) || "pad-column".equals(id) || "files-columns".equals(id);
+        float columnWeight = "pad-column".equals(id) ? (tabletWide ? 1.65f : 1.1f) : "file-library-column".equals(id) || "file-library-pane".equals(id) ? 1.16f : 1f;
         LinearLayout.LayoutParams lp = horizontal
-            ? new LinearLayout.LayoutParams(0, id.endsWith("-column") ? -1 : -2, columnWeight)
+            ? new LinearLayout.LayoutParams(0, id.endsWith("-column") || id.endsWith("-pane") ? -1 : -2, columnWeight)
             : new LinearLayout.LayoutParams(-1, grows ? 0 : -2, grows ? 1 : 0);
+        if (isClearAction(id)) { lp.width = dp(48); lp.weight = 0; }
+        if (horizontal && (id.startsWith("share-remove-") || id.startsWith("share-retry-"))) { lp.width = dp(48); lp.weight = 0; }
+        if (horizontal && "share-clear".equals(id)) { lp.width = dp(64); lp.weight = 0; }
         if ("dpad".equals(id) || "dial-column".equals(id) || "handset-portrait".equals(id)) {
             if (!horizontal) { lp.height = -2; lp.weight = 1; }
             lp.gravity = Gravity.CENTER;
@@ -861,6 +1228,7 @@ final class NativeRemoteUi {
 
     private View create(JSONObject item, LinearLayout parent) {
         String kind = item.optString("kind"), id = item.optString("id");
+        String actionId = item.optString("actionId", id);
         View view;
         switch (kind) {
             case "header":
@@ -880,7 +1248,7 @@ final class NativeRemoteUi {
                 view = group;
                 break;
             case "strip":
-                if ("column:keyboard-shortcuts".equals(parent.getTag())) {
+                if ("column:keyboard-shortcuts".equals(parent.getTag()) || "custom-modifiers".equals(id) || "custom-key-groups".equals(id)) {
                     view = new KeyboardGrid();
                     break;
                 }
@@ -893,9 +1261,16 @@ final class NativeRemoteUi {
                 strip.addView(items, new HorizontalScrollView.LayoutParams(-2, -2));
                 view = strip;
                 break;
+            case "scroll":
+                FilePane pane = new FilePane(id);
+                LinearLayout paneContent = column();
+                paneContent.setTag("file-pane-content");
+                pane.addView(paneContent, new ScrollView.LayoutParams(-1, -2));
+                view = pane;
+                break;
             case "switch":
                 CompoundButton toggle = new PreferenceToggle();
-                toggle.setOnClickListener(v -> emit(id, toggle.isChecked()));
+                toggle.setOnClickListener(v -> emit(actionId, toggle.isChecked()));
                 view = toggle;
                 break;
             case "slider":
@@ -913,7 +1288,7 @@ final class NativeRemoteUi {
                 seek.setMax(25);
                 seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                     @Override public void onProgressChanged(SeekBar bar, int value, boolean user) {
-                        if (user) emit(id, (5 + value) / 10.0);
+                        if (user) emit(actionId, (5 + value) / 10.0);
                     }
                     @Override public void onStartTrackingTouch(SeekBar bar) {}
                     @Override public void onStopTrackingTouch(SeekBar bar) {}
@@ -928,26 +1303,34 @@ final class NativeRemoteUi {
             case "edit":
                 SessionEdit edit = new SessionEdit();
                 boolean numeric = "code".equals(id);
-                edit.setTextSize(17);
-                edit.setSingleLine(numeric);
-                edit.setInputType(numeric ? InputType.TYPE_CLASS_NUMBER : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-                if (!numeric) edit.setGravity(Gravity.TOP | Gravity.START);
-                edit.setMinLines(numeric ? 1 : 2);
-                edit.setMaxLines(numeric ? 1 : "column:keyboard-entry".equals(parent.getTag()) ? Integer.MAX_VALUE : 4);
-                edit.setFilters(new InputFilter[]{new InputFilter.LengthFilter(numeric ? 6 : 1000)});
-                edit.setImeOptions(numeric ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+                boolean search = "file-filter".equals(id) || "shortcut-filter".equals(id) || "application-filter".equals(id) || "window-filter".equals(id);
+                boolean planName = "plan-name".equals(id);
+                boolean singleLine = numeric || search || planName;
+                edit.setTextSize(16);
+                edit.setSingleLine(singleLine);
+                if (search) edit.setMinimumHeight(dp(48));
+                edit.setInputType(numeric ? InputType.TYPE_CLASS_NUMBER : singleLine ? InputType.TYPE_CLASS_TEXT : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                if (!singleLine) edit.setGravity(Gravity.TOP | Gravity.START);
+                edit.setMinLines(singleLine ? 1 : 2);
+                edit.setMaxLines(singleLine ? 1 : "column:keyboard-entry".equals(parent.getTag()) ? Integer.MAX_VALUE : 4);
+                edit.setFilters(new InputFilter[]{new InputFilter.LengthFilter(numeric ? 6 : planName ? 64 : search ? 120 : 1000)});
+                int imeAction = "file-filter".equals(id) ? EditorInfo.IME_ACTION_SEARCH : singleLine ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_SEND;
+                edit.setImeOptions(imeAction | (numeric ? 0 : EditorInfo.IME_FLAG_NO_EXTRACT_UI));
                 edit.setOnEditorActionListener((v, action, event) -> {
-                    if (action != (numeric ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_SEND)) return false;
+                    if (action != imeAction) return false;
                     // Enter only confirms an IME candidate while composing; never send it to the PC.
                     if (!numeric && hasComposingText(edit.getText())) return true;
-                    emit(numeric ? "pair" : "send", null);
+                    if (search || planName) {
+                        ((android.view.inputmethod.InputMethodManager) activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(edit.getWindowToken(), 0);
+                        edit.clearFocus();
+                    } else emit(item.optString("submitAction", numeric ? "pair" : "send"), null);
                     return true;
                 });
                 edit.addTextChangedListener(new TextWatcher() {
                     @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
                     @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
                         if (!editing) {
-                            try { emit(id, new JSONObject().put("text", s.toString()).put("revision", ++edit.revision)); }
+                            try { emit(actionId, new JSONObject().put("text", s.toString()).put("revision", ++edit.revision)); }
                             catch (JSONException ignored) {}
                         }
                     }
@@ -960,12 +1343,28 @@ final class NativeRemoteUi {
                 progress.setMax(100);
                 view = progress;
                 break;
+            case "notice":
+                LinearLayout notice = new LinearLayout(activity);
+                notice.setGravity(Gravity.TOP);
+                notice.setPadding(dp(12), dp(10), dp(12), dp(10));
+                ImageView noticeIcon = new ImageView(activity);
+                LinearLayout.LayoutParams noticeIconParams = new LinearLayout.LayoutParams(dp(20), dp(20));
+                noticeIconParams.topMargin = dp(1);
+                notice.addView(noticeIcon, noticeIconParams);
+                TextView noticeCopy = label(13);
+                noticeCopy.setLineSpacing(dp(2), 1f);
+                LinearLayout.LayoutParams noticeCopyParams = new LinearLayout.LayoutParams(0, -2, 1);
+                noticeCopyParams.setMarginStart(dp(10));
+                notice.addView(noticeCopy, noticeCopyParams);
+                notice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+                view = notice;
+                break;
             case "window":
                 LinearLayout windowRow = new LinearLayout(activity);
                 windowRow.setOrientation(LinearLayout.HORIZONTAL);
                 windowRow.setGravity(Gravity.CENTER_VERTICAL);
                 windowRow.setMinimumHeight(dp(AdaptiveLayout.TOUCH_TARGET_DP));
-                windowRow.setPadding(dp(12), dp(8), dp(12), dp(8));
+                windowRow.setPadding(dp(14), dp(12), dp(14), dp(12));
                 windowRow.setFocusable(true);
                 ImageView windowIcon = new ImageView(activity);
                 windowIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -979,7 +1378,7 @@ final class NativeRemoteUi {
                 TextView windowState = label(12);
                 windowState.setGravity(Gravity.END);
                 windowRow.addView(windowState, new LinearLayout.LayoutParams(-2, -2));
-                windowRow.setOnClickListener(v -> emit(id, null));
+                windowRow.setOnClickListener(v -> emit(actionId, null));
                 view = windowRow;
                 break;
             case "dpad":
@@ -999,10 +1398,10 @@ final class NativeRemoteUi {
                             new Rect(0, top, edge, top + band), new Rect(r - l - edge, top, r - l, top + band)));
                     });
                 }
-                target.setOnClickListener(v -> emit(id, null));
+                target.setOnClickListener(v -> emit(actionId, null));
                 if ("mic".equals(id)) target.setOnKeyListener((v, key, event) -> {
                     if (key != KeyEvent.KEYCODE_ENTER && key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_SPACE) return false;
-                    if (event.getRepeatCount() == 0) emit(id, event.getAction() == KeyEvent.ACTION_DOWN);
+                    if (event.getRepeatCount() == 0) emit(actionId, event.getAction() == KeyEvent.ACTION_DOWN);
                     return true;
                 });
                 target.setOnTouchListener((v, event) -> {
@@ -1015,11 +1414,11 @@ final class NativeRemoteUi {
                 break;
             case "button":
                 if (String.valueOf(parent.getTag()).startsWith("row:more-")) {
-                    view = new MoreTile(id);
+                    view = new MoreTile(id, actionId);
                     break;
                 }
                 Button button = new ControlButton();
-                button.setAllCaps(false);
+                UiStyle.button(button);
                 button.setStateListAnimator(null);
                 button.setElevation(0);
                 button.setTextSize(14);
@@ -1027,15 +1426,20 @@ final class NativeRemoteUi {
                 button.setMinimumHeight(dp(AdaptiveLayout.TOUCH_TARGET_DP));
                 button.setMinWidth(0);
                 button.setMinimumWidth(0);
-                button.setOnClickListener(v -> emit(id, null));
+                button.setOnClickListener(v -> emit(actionId, null));
                 view = button;
+                break;
+            case "action-row":
+                ActionRow actionRow = new ActionRow();
+                actionRow.setOnClickListener(v -> emit(actionId, null));
+                view = actionRow;
                 break;
             case "setting-button":
                 LinearLayout setting = new SettingRow();
                 setting.setGravity(Gravity.CENTER_VERTICAL);
                 setting.setMinimumHeight(dp(52));
                 setting.setPadding(dp(16), dp(8), dp(16), dp(8));
-                setting.setOnClickListener(v -> emit(id, null));
+                setting.setOnClickListener(v -> emit(actionId, null));
                 setting.setFocusable(true);
                 TextView settingLabel = label(14), settingValue = label(13);
                 settingValue.setGravity(Gravity.END);
@@ -1053,22 +1457,34 @@ final class NativeRemoteUi {
                     value.setTypeface(null, Typeface.BOLD);
                     markHeading(value);
                 }
-                value.setTextIsSelectable("folder".equals(id) || "address".equals(id));
+                value.setTextIsSelectable("folder-path".equals(id) || "address".equals(id));
+                if (id.startsWith("share-name-")) {
+                    value.setMaxLines(2);
+                    value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    value.setMinimumHeight(dp(48));
+                    value.setGravity(Gravity.CENTER_VERTICAL);
+                    value.setFocusable(true);
+                    value.setOnClickListener(v -> emit(actionId, null));
+                }
                 if ("folder".equals(id)) {
                     value.setMaxLines(2);
                     value.setEllipsize(android.text.TextUtils.TruncateAt.END);
                     value.setTextSize(12);
-                    value.setOnClickListener(v -> new android.app.AlertDialog.Builder(activity)
-                        .setMessage(value.getText()).setPositiveButton(android.R.string.ok, null).show());
+                    if (item.has("actionId")) value.setOnClickListener(v -> emit(actionId, null));
                 }
                 view = value;
         }
         view.setTag(kind + ":" + id);
+        boundActions.put(view, actionId);
         return view;
     }
 
     private void update(View view, JSONObject item) {
         if (view == header) return;
+        if (view instanceof ActionRow actionRow) {
+            actionRow.update(item);
+            return;
+        }
         String kind = item.optString("kind"), id = item.optString("id");
         if (view instanceof NativeMicrophoneUi.Key) {
             NativeMicrophoneUi.Key key = (NativeMicrophoneUi.Key) view;
@@ -1117,6 +1533,9 @@ final class NativeRemoteUi {
             case "strip":
                 reconcile(view instanceof KeyboardGrid grid ? grid : (LinearLayout) ((HorizontalScrollView) view).getChildAt(0), item.optJSONArray("children"), true);
                 break;
+            case "scroll":
+                reconcile((LinearLayout) ((ScrollView) view).getChildAt(0), item.optJSONArray("children"), false);
+                break;
             case "switch":
                 CompoundButton toggle = (CompoundButton) view;
                 setSupportingText(toggle, label, detail);
@@ -1153,12 +1572,27 @@ final class NativeRemoteUi {
                 break;
             case "edit":
                 SessionEdit edit = (SessionEdit) view;
+                edit.setAlpha(enabled ? 1f : .44f);
                 edit.setTextColor(ink());
                 edit.setHintTextColor(muted());
                 edit.setHint(label);
-                applyEditBackground(edit);
-                edit.setOnFocusChangeListener((v, focused) -> applyEditBackground(edit));
-                edit.setPadding(dp(12), dp(10), dp(12), dp(10));
+                if ("file-filter".equals(id)) {
+                    edit.setBackground(null);
+                    edit.setBackgroundTintList(null);
+                    edit.setTextSize(14);
+                    edit.setIncludeFontPadding(false);
+                    edit.setMinimumHeight(dp(48));
+                    edit.setPadding(dp(14), dp(12), dp(14), dp(12));
+                    edit.setCompoundDrawablePadding(dp(10));
+                    edit.setCompoundDrawablesRelative(NativeIcon.of("search", muted(), dp(20)), null, null, null);
+                    edit.setOnFocusChangeListener((v, focused) -> ((DividedLayout) v.getParent()).applyStyle());
+                } else applyEditBackground(edit);
+                if ("code".equals(id)) {
+                    edit.setGravity(Gravity.CENTER);
+                    boolean digits = !item.optString("value").isEmpty();
+                    edit.setTypeface(digits ? Typeface.MONOSPACE : Typeface.DEFAULT);
+                    edit.setLetterSpacing(digits ? .12f : 0);
+                }
                 String draft = item.optString("value", "");
                 int revision = item.optInt("revision");
                 if (revision < edit.revision) break;
@@ -1175,6 +1609,17 @@ final class NativeRemoteUi {
                 ((ProgressBar) view).setProgress(item.optInt("value"));
                 ((ProgressBar) view).setProgressTintList(ColorStateList.valueOf(accent()));
                 break;
+            case "notice":
+                LinearLayout notice = (LinearLayout) view;
+                boolean error = "error".equals(item.optString("tone"));
+                boolean success = "success".equals(item.optString("tone"));
+                int noticeInk = error ? (dark ? 0xffffb1b6 : 0xffb73b45) : success ? (dark ? 0xff6bd5ae : 0xff0f7555) : muted();
+                notice.setBackground(shape(error ? (dark ? 0xff362127 : 0xfffff0f1) : tonal(), 14));
+                ((ImageView) notice.getChildAt(0)).setImageDrawable(NativeIcon.of(success ? "check-circle" : "alert-circle", noticeInk, dp(20)));
+                TextView noticeCopy = (TextView) notice.getChildAt(1);
+                noticeCopy.setTextColor(noticeInk);
+                setSupportingText(noticeCopy, label, detail);
+                break;
             case "window":
                 LinearLayout windowRow = (LinearLayout) view;
                 ImageView windowIcon = (ImageView) windowRow.getChildAt(0);
@@ -1182,23 +1627,42 @@ final class NativeRemoteUi {
                 TextView windowTitle = (TextView) windowCopy.getChildAt(0);
                 TextView windowApp = (TextView) windowCopy.getChildAt(1);
                 TextView windowState = (TextView) windowRow.getChildAt(2);
-                windowRow.setBackground(ripple(tonal(), 14));
-                windowRow.setAlpha(enabled ? 1f : .5f);
+                windowRow.setBackground(ripple(tonal(), UiStyle.BUTTON_RADIUS));
+                windowRow.setClickable(enabled);
+                windowRow.setFocusable(enabled);
+                windowRow.setAlpha(1f);
                 String status = item.optString("status");
                 windowRow.setContentDescription(label + (detail.isEmpty() ? "" : " · " + detail) + (status.isEmpty() ? "" : " · " + status));
-                windowTitle.setTextColor(enabled ? ink() : muted());
+                boolean planPreview = id.startsWith("plan-preview-");
+                windowRow.setMinimumHeight(dp(detail.isEmpty() ? 56 : 64));
+                windowTitle.setTextColor(enabled || id.startsWith("window-") || planPreview ? ink() : muted());
                 windowTitle.setTextSize(14);
-                windowTitle.setMaxLines(1);
+                windowTitle.setIncludeFontPadding(false);
+                windowApp.setIncludeFontPadding(false);
+                ((LinearLayout.LayoutParams) windowApp.getLayoutParams()).topMargin = detail.isEmpty() ? 0 : dp(4);
+                windowTitle.setMaxLines(2);
                 windowTitle.setEllipsize(TextUtils.TruncateAt.END);
                 setText(windowTitle, label);
                 windowApp.setTextColor(muted());
                 windowApp.setTextSize(12);
+                boolean pickerRow = id.startsWith("window-");
+                windowApp.setMaxLines(pickerRow ? 1 : Integer.MAX_VALUE);
+                windowApp.setMinLines(pickerRow ? 1 : 0);
+                windowApp.setEllipsize(pickerRow ? TextUtils.TruncateAt.END : null);
+                int supportingHeight = (int) Math.ceil(TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_SP, 18, activity.getResources().getDisplayMetrics()));
+                windowApp.setMinHeight(pickerRow ? supportingHeight : 0);
+                windowApp.setMaxHeight(pickerRow ? supportingHeight : Integer.MAX_VALUE);
+                windowApp.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
                 setText(windowApp, detail);
-                windowApp.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
+                windowApp.setVisibility(detail.isEmpty() && !pickerRow ? View.GONE : View.VISIBLE);
                 windowState.setTextColor(accent());
                 windowState.setTextSize(12);
                 setText(windowState, item.optString("status"));
-                applyWindowIcon(windowIcon, item.optString("icon"));
+                if (planPreview) {
+                    windowIcon.setImageDrawable(NativeIcon.of(item.optString("icon"), accent(), dp(22)));
+                    windowRow.setFocusable(false);
+                } else applyWindowIcon(windowIcon, item.optString("icon"));
                 break;
             case "setting-button":
                 LinearLayout setting = (LinearLayout) view;
@@ -1216,30 +1680,56 @@ final class NativeRemoteUi {
                 break;
             default:
                 TextView control = (TextView) view;
-                control.setTextColor("heading".equals(kind) ? accent() : enabled || id.startsWith("nav-") ? ink() : muted());
+                control.setTextColor("heading".equals(kind) ? ink() : enabled || id.startsWith("nav-") ? ink() : muted());
                 setSupportingText(control, label, detail);
+                if ("neutral".equals(item.optString("tone"))) {
+                    control.setTextColor(muted());
+                    control.setTextSize(12);
+                }
                 if ("button".equals(kind) || "pad".equals(kind) || "mic".equals(kind)) {
-                    styleControl(control, id, label, detail, enabled, item.optString("icon"), item.optString("status"), item.has("selected") && "button".equals(kind), item.optBoolean("iconOnly"));
+                    if (item.has("selected")) control.setSelected(item.optBoolean("selected"));
+                    styleControl(control, id, label, detail, enabled, item.optString("icon"), item.optString("status"), item.has("selected") && "button".equals(kind) && !id.startsWith("custom-"), item.optBoolean("iconOnly"));
+                    if ("clear-file-filter".equals(id)) {
+                        control.setVisibility(enabled ? View.VISIBLE : View.GONE);
+                        control.setBackground(ripple(Color.TRANSPARENT, 24));
+                        ((ControlButton) control).centerIcon = NativeIcon.of("close", muted(), dp(20));
+                    }
                     if (item.has("status") && !"pad".equals(kind))
                         control.setContentDescription(item.optString("status"));
-                    if (item.has("selected")) {
-                        control.setSelected(item.optBoolean("selected"));
-                    }
                     if (control instanceof TouchPadView) {
                         TouchPadView pad = (TouchPadView) control;
                         pad.status = item.optString("status");
                         pad.hint = item.optString("hint");
                         String description = String.join(" · ", label, pad.status, detail);
                         pad.setContentDescription(pad.hint.isEmpty() ? description : description + " · " + pad.hint);
+                    } else if ("mic".equals(kind)) {
+                        String hint = item.optString("hint");
+                        control.setContentDescription(hint.isEmpty() ? label : label + " · " + hint);
                     }
                 } else {
+                    if ("text".equals(kind)) {
+                        int lines = item.optInt("maxLines", "folder".equals(id) || id.startsWith("share-name-") ? 2 : 0);
+                        control.setMaxLines(lines > 0 ? Math.min(16, lines) : Integer.MAX_VALUE);
+                        control.setEllipsize(lines > 0 ? TextUtils.TruncateAt.END : null);
+                    }
                     control.setPadding(dp(8), dp(6), dp(8), dp(6));
+                    if ("share-title".equals(id)) { control.setTextSize(15); control.setTextColor(ink()); }
+                    if (id.startsWith("share-info-") || "share-hint".equals(id)) {
+                        control.setTextSize(12);
+                        control.setTextColor(muted());
+                        control.setPadding(dp(8), 0, dp(8), dp(6));
+                    }
                     if ("receive".equals(id) || "shared".equals(id)) {
                         control.setTextColor(ink());
                         control.setTextSize("shared".equals(id) ? 16 : 14);
                         control.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                     }
                     if ("receive".equals(id) || "folder".equals(id)) control.setPadding(dp(8), 0, dp(8), 0);
+                    if ("custom-key-preview".equals(id)) {
+                        control.setTextSize(18);
+                        control.setGravity(Gravity.CENTER);
+                        control.setMinimumHeight(dp(48));
+                    }
                     if ("shared".equals(id)) control.setPadding(dp(16), dp(6), 0, dp(6));
                     if ("folder".equals(id) || id.startsWith("history-")) {
                         control.setTextSize(12);
@@ -1297,13 +1787,16 @@ final class NativeRemoteUi {
                         control.setPadding(0, dp(3), 0, dp(3));
                     }
                     if ("pc-name".equals(id) || "pc-status".equals(id) || "address".equals(id)) {
-                        control.setGravity(Gravity.CENTER);
+                        boolean inline = wide && !tabletWide;
+                        control.setGravity(inline ? Gravity.START | Gravity.CENTER_VERTICAL : Gravity.CENTER);
                         control.setTextColor("pc-name".equals(id) ? ink() : muted());
-                        control.setPadding(dp(10), dp(4), dp(10), dp(4));
+                        control.setPadding(dp(10), dp(inline ? 2 : 4), dp(10), dp(inline ? 2 : 4));
                         if ("pc-name".equals(id)) {
-                            control.setTextSize(18);
-                            control.setCompoundDrawables(null, NativeIcon.of("monitor", accent(), dp(40)), null, null);
-                            control.setCompoundDrawablePadding(dp(12));
+                            control.setTextSize(inline ? 16 : 18);
+                            Drawable glyph = NativeIcon.of("monitor", accent(), dp(inline ? 24 : 40));
+                            if (inline) control.setCompoundDrawablesRelative(glyph, null, null, null);
+                            else control.setCompoundDrawables(null, glyph, null, null);
+                            control.setCompoundDrawablePadding(dp(inline ? 8 : 12));
                         } else control.setTextSize(13);
                     }
                     if ("quality".equals(id) || "permission".equals(id)) {
@@ -1340,14 +1833,19 @@ final class NativeRemoteUi {
     }
 
     private void applyWindowIcon(ImageView view, String source) {
-        if (source.startsWith("data:image/")) {
+        if (source.length() <= 90000 && (source.startsWith("data:image/png;base64,") || source.startsWith("data:image/bmp;base64,"))) {
             String key = "bitmap:" + source;
             if (key.equals(view.getTag())) return;
             int comma = source.indexOf(',');
             if (comma > 0) {
                 try {
                     byte[] bytes = Base64.decode(source.substring(comma + 1), Base64.DEFAULT);
-                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    BitmapFactory.Options bounds = new BitmapFactory.Options();
+                    bounds.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+                    Bitmap bitmap = bounds.outWidth >= 1 && bounds.outWidth <= 128
+                        && bounds.outHeight >= 1 && bounds.outHeight <= 128
+                        ? BitmapFactory.decodeByteArray(bytes, 0, bytes.length) : null;
                     if (bitmap != null) {
                         view.setImageBitmap(bitmap);
                         view.setTag(key);
@@ -1356,16 +1854,25 @@ final class NativeRemoteUi {
                 } catch (IllegalArgumentException ignored) { /* Fall through to the placeholder. */ }
             }
         }
-        if (!"fallback".equals(view.getTag())) {
-            view.setImageDrawable(NativeIcon.of("monitor", muted(), dp(28)));
-            view.setTag("fallback");
+        String fallback = "folder".equals(source) ? "folder" : "monitor";
+        String key = "fallback:" + fallback + ":" + muted();
+        if (!key.equals(view.getTag())) {
+            view.setImageDrawable(NativeIcon.of(fallback, muted(), dp(28)));
+            view.setTag(key);
         }
     }
 
-    private void applyEditBackground(EditText edit) {
-        GradientDrawable field = shape(tonal(), 14);
-        if (edit.hasFocus()) field.setStroke(dp(1), accent());
-        edit.setBackground(field);
+    private void applyEditBackground(EditText edit) { UiStyle.field(edit, dark); }
+
+    private boolean isClearAction(String id) {
+        return "clear-file-filter".equals(id) || "clear-shortcut-filter".equals(id)
+            || "clear-application-filter".equals(id) || "clear-window-filter".equals(id);
+    }
+
+    private boolean inSheet(View view) {
+        for (ViewParent parent = view.getParent(); parent != null; parent = parent.getParent())
+            if (parent == sheetLayout) return true;
+        return false;
     }
 
     private void constrainToLines(TextView text, int lines) {
@@ -1406,8 +1913,9 @@ final class NativeRemoteUi {
 
     private void updateConnectionChip(TextView chip, String accessible, String label, String latency, String status) {
         String style = dark + ":" + status;
-        boolean styleChanged = !style.equals(header.chipStyle);
+        boolean styleChanged = chip != header.styledChip || !style.equals(header.chipStyle);
         if (styleChanged) {
+            header.styledChip = chip;
             header.chipStyle = style;
             styleControl(chip, "connection-chip", label, "", true, "", status, false, false);
             GradientDrawable dot = shape(chip.getCurrentTextColor(), 8);
@@ -1439,7 +1947,7 @@ final class NativeRemoteUi {
             return;
         }
         boolean nav = id.startsWith("nav-");
-        boolean selected = nav && !enabled;
+        boolean selected = nav && !enabled || id.startsWith("custom-") && view.isSelected();
         String group = view.getParent() instanceof View parent ? String.valueOf(parent.getTag()) : "";
         boolean rocker = group.startsWith("row:rocker-");
         boolean media = rocker || group.equals("row:volume") || group.equals("row:playback");
@@ -1450,15 +1958,20 @@ final class NativeRemoteUi {
         boolean saveFile = id.startsWith("save-");
         boolean history = "column:file-history-card".equals(group);
         boolean folderAction = "pick-folder".equals(id) || "reload".equals(id) || id.startsWith("save-");
-        boolean primary = "send".equals(id) || "pair".equals(id) || "upload".equals(id) || "window-confirm".equals(id)
-            || "reconnect".equals(id);
+        boolean footerAction = sheetFooter != null && view.getParent() == sheetFooter;
+        JSONArray footerItems = latest == null ? null : latest.optJSONArray("sheetFooter");
+        boolean reconnectPrimary = "reconnect".equals(id) && !("connection".equals(sheetKey) && footerItems != null && footerItems.length() > 0);
+        boolean primary = "send".equals(id) || "share-send".equals(id) || "pair".equals(id) || "upload".equals(id) || "window-confirm".equals(id)
+            || reconnectPrimary || "custom-key-save".equals(id) || "plan-apply".equals(id) || "plan-save".equals(id)
+            || footerAction && !"microphone-stop".equals(id);
         boolean connection = "connection-chip".equals(id);
         boolean key = id.startsWith("key-"), combo = id.startsWith("combo-");
         boolean session = group.equals("row:session");
-        boolean danger = "power".equals(id);
+        boolean danger = "power".equals(id) || "plan-delete".equals(id) || "plan-delete-confirm".equals(id)
+            || id.startsWith("unfinished-confirm-delete-") || footerAction && "microphone-stop".equals(id);
         boolean forget = "forget".equals(id);
         boolean diagnostics = "diagnostics".equals(id);
-        if (key || combo) constrainToLines(view, 1);
+        if (key || combo || id.startsWith("custom-mod-") || id.startsWith("custom-group-")) constrainToLines(view, 1);
         else {
             view.setMaxLines(Integer.MAX_VALUE);
             view.setEllipsize(null);
@@ -1470,31 +1983,32 @@ final class NativeRemoteUi {
         int connectionInk = "fair".equals(status) ? (dark ? 0xffffd18b : 0xff925b00)
             : "poor".equals(status) ? (dark ? 0xffffb1b6 : 0xffb73b45)
             : "good".equals(status) || "unknown".equals(status) ? (dark ? 0xff6bd5ae : 0xff0f7555) : muted();
-        int foreground = primary ? (dark ? 0xff122448 : Color.WHITE) : selected || combo ? accent() : enabled ? ink() : muted();
-        int fill = primary ? accent() : key || "change".equals(id) || group.startsWith("row:window-") ? tonal() : combo ? accentSoft()
+        int foreground = primary ? UiStyle.onAccent(dark) : selected || combo || option && view.isSelected() ? accent() : enabled ? ink() : muted();
+        int fill = primary ? accent() : selected && id.startsWith("custom-") ? accentSoft() : key || id.startsWith("custom-") || "change".equals(id) || group.startsWith("row:window-") ? tonal() : combo ? accentSoft()
             : connection ? ("good".equals(status) ? (dark ? 0xff233b36 : 0xffe7f1ef) : tonal())
             : danger ? (dark ? 0xff362127 : 0xfffff0f1)
             : saveFile && enabled ? accentSoft()
-            : option || forget || diagnostics || history ? Color.TRANSPARENT
+            : option ? (view.isSelected() ? accentSoft() : tonal()) : forget || diagnostics || history ? Color.TRANSPARENT
             : nav || media || tools && !tabletWide || mouse || settings || session || fileRow || folderAction ? Color.TRANSPARENT : surface();
+        if (!primary && fill == surface() && inSheet(view)) fill = tonal();
         view.setTextColor(connection ? connectionInk : danger || forget ? (dark ? 0xffffb1b6 : 0xffb73b45)
             : diagnostics ? muted() : folderAction ? accent() : foreground);
         view.setBackground(session && !"focus".equals(id) ? new InsetDrawable(ripple(tonal(), 12), 0, dp(5), 0, dp(5))
-            : ripple(fill, connection || primary && !media ? 24 : option ? 12 : 16));
+            : ripple(fill, connection ? 24 : UiStyle.BUTTON_RADIUS));
         view.setAlpha(!enabled && !nav ? .44f : 1f);
         view.setGravity(settings || fileRow || option || diagnostics || "history-toggle".equals(id)
             ? Gravity.START | Gravity.CENTER_VERTICAL : Gravity.CENTER);
         view.setTextSize(nav ? 11 : tools && tabletWide ? 13 : session || connection || tools ? 12 : diagnostics ? 13 : 14);
         view.setMinimumHeight(dp(nav ? (compact ? 56 : 62) : tools ? (tabletWide ? 68 : compact ? 56 : wide ? 54 : 66)
             : mouse ? 52 : option ? (detail.isEmpty() ? 48 : 60) : settings || fileRow ? 60 : "upload".equals(id) ? 50 : 48));
-        int horizontalPadding = session || folderAction || history ? 8 : settings || connection || fileRow ? 12 : 4;
-        view.setPadding(dp(horizontalPadding), dp(6), dp(horizontalPadding), dp(6));
+        int horizontalPadding = session || folderAction || history ? 8 : settings || fileRow ? 16 : connection ? 12 : media || tools || mouse || nav ? 4 : 16;
+        view.setPadding(dp(horizontalPadding), dp(media || tools || mouse || nav || session ? 6 : 12), dp(horizontalPadding), dp(media || tools || mouse || nav || session ? 6 : 12));
         view.setCompoundDrawablePadding(dp(5));
         if (key || combo) {
             view.setMinimumWidth(dp(key ? 50 : 56));
             view.setPadding(dp(13), dp(6), dp(13), dp(6));
         }
-        if (option) view.setPadding(dp(4), dp(8), dp(44), dp(8));
+        if (option) { view.setPadding(dp(14), dp(12), dp(48), dp(12)); view.setCompoundDrawablePadding(dp(12)); }
         if (diagnostics) view.setPadding(dp(8), dp(8), dp(10), dp(8));
         if (view instanceof ControlButton) ((ControlButton) view).option = option;
         if (tools && view instanceof ControlButton button) {
@@ -1502,7 +2016,9 @@ final class NativeRemoteUi {
             button.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
             button.setIncludeFontPadding(false);
         }
-        String icon = explicitIcon.isEmpty() ? iconFor(id) : explicitIcon;
+        boolean clear = isClearAction(id);
+        iconOnly = iconOnly || clear;
+        String icon = clear ? "close" : explicitIcon.isEmpty() ? iconFor(id) : explicitIcon;
         if (icon != null) {
             int color = primary || selected ? foreground : media ? ink() : muted();
             Drawable glyph = NativeIcon.of(icon, option ? accent() : color, dp(diagnostics ? 16 : session ? 18 : 22));
@@ -1531,27 +2047,36 @@ final class NativeRemoteUi {
         boolean padLayoutAction = session && view.getParent().getParent() instanceof View pane
             && "column:tool-column".equals(pane.getTag()) && ("focus".equals(id) || "pad-side".equals(id));
         if (iconOnly || padLayoutAction) {
+            boolean sheetAction = view.getParent() == sheetHeaderActions;
             setText(view, "");
             view.setCompoundDrawables(null, null, null, null);
             view.setGravity(Gravity.CENTER);
             view.setPadding(0, 0, 0, 0);
-            int target = dp(padLayoutAction ? 48 : 52);
+            boolean fileSort = "file-order".equals(id);
+            boolean utility = clear || fileSort || "close".equals(icon) || group.equals("row:window-actions");
+            int target = dp(padLayoutAction || sheetAction || utility ? 48 : 52);
             view.setMinWidth(target);
             view.setMinimumWidth(target);
             view.setMinHeight(target);
             view.setMinimumHeight(target);
-            view.setBackground(ripple(padLayoutAction ? Color.TRANSPARENT : primary ? accent() : group.startsWith("row:window-actions") ? Color.TRANSPARENT : tonal(), "row:handset-tools".equals(group) ? 20 : 26));
+            view.setBackground(ripple(padLayoutAction || sheetAction || fileSort ? Color.TRANSPARENT : primary ? accent() : group.startsWith("row:window-actions") ? Color.TRANSPARENT : tonal(), "row:handset-tools".equals(group) ? 20 : 26));
             if (view instanceof ControlButton) {
                 ControlButton button = (ControlButton) view;
                 button.inlineIcon = null;
                 button.centerIcon = icon == null ? null
-                    : NativeIcon.of(icon, padLayoutAction ? muted() : primary ? (dark ? 0xff122448 : Color.WHITE) : enabled ? ink() : muted(), dp(padLayoutAction ? 20 : 24));
+                    : NativeIcon.of(icon, padLayoutAction || sheetAction || fileSort ? muted() : primary ? UiStyle.onAccent(dark) : enabled ? ink() : muted(), dp(padLayoutAction || sheetAction || utility ? UiStyle.ICON : 24));
             }
-            if (padLayoutAction) {
+            if (fileSort) view.setTooltipText(status);
+            else if (padLayoutAction || sheetAction) {
                 view.setContentDescription(label);
                 view.setTooltipText(label);
             } else if (TextUtils.isEmpty(view.getContentDescription())) view.setContentDescription(label);
             return;
+        }
+        if (view.getParent() == sheetHeaderActions) {
+            view.setMinimumWidth(dp(64));
+            view.setPadding(dp(14), dp(10), dp(14), dp(10));
+            view.setMinimumHeight(dp(48));
         }
         if (media || saveFile || "reload".equals(id)) {
             view.setCompoundDrawables(null, null, null, null);
@@ -1581,6 +2106,8 @@ final class NativeRemoteUi {
             setButtonDrawable((Drawable) null);
             setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
             setTextSize(14);
+            setIncludeFontPadding(false);
+            setLetterSpacing(0);
         }
         @Override public CharSequence getAccessibilityClassName() { return Switch.class.getName(); }
         @Override protected void onDraw(Canvas canvas) {
@@ -1609,6 +2136,7 @@ final class NativeRemoteUi {
         private final String id;
         private final Paint divider = new Paint();
         private Boolean styledDark;
+        private String searchStyle = "";
         DividedLayout(String id) {
             super(activity);
             this.id = id;
@@ -1689,6 +2217,19 @@ final class NativeRemoteUi {
         }
 
         void applyStyle() {
+            if ("files-search".equals(id)) {
+                String key = dark + ":" + hasFocus();
+                if (!key.equals(searchStyle)) {
+                    searchStyle = key;
+                    GradientDrawable fill = shape(tonal(), 20);
+                    if (hasFocus()) fill.setStroke(dp(1), accent());
+                    setBackground(fill);
+                    setClipToOutline(true);
+                    setMinimumHeight(dp(48));
+                    setGravity(Gravity.CENTER_VERTICAL);
+                }
+                return;
+            }
             if (styledDark != null && styledDark == dark) return;
             styledDark = dark;
             if (id.startsWith("more-double-")) setWeightSum(2);
@@ -1700,13 +2241,15 @@ final class NativeRemoteUi {
                 setGravity(Gravity.CENTER_VERTICAL);
                 setMinimumHeight(dp(66));
             }
-            if ("folder-card".equals(id) || "files-header".equals(id) || "quality-row".equals(id)) setGravity(Gravity.CENTER_VERTICAL);
+            if ("folder-card".equals(id) || "files-header".equals(id) || "quality-row".equals(id) || id.startsWith("share-file-")) setGravity(Gravity.CENTER_VERTICAL);
             if ("folder-card".equals(id)) setPadding(dp(8), dp(8), dp(8), dp(8));
             if ("files-header".equals(id)) setPadding(0, 0, dp(8), 0);
+            if ("file-library-tools".equals(id)) setGravity(Gravity.CENTER_VERTICAL);
             if ("file-library-card".equals(id) || "file-history-card".equals(id)) {
                 setPadding(dp(8), dp(4), dp(8), dp(4));
             }
             if ("transfer-card".equals(id)) setPadding(dp(8), dp(8), dp(8), dp(8));
+            if ("share-card".equals(id)) setPadding(dp(16), dp(12), dp(16), dp(12));
             if ("connection-hero".equals(id)) setPadding(0, dp(10), 0, dp(8));
             if ("pad-column".equals(id)) {
                 GradientDrawable border = shape(surface(), 24);
@@ -1714,7 +2257,7 @@ final class NativeRemoteUi {
                 setBackground(border);
                 setClipToOutline(true);
             } else if (id.startsWith("rocker-") || id.equals("tools") || "volume".equals(id) || "playback".equals(id) || id.startsWith("settings-")
-                || "folder-card".equals(id) || "file-library-card".equals(id) || "file-history-card".equals(id) || "transfer-card".equals(id)
+                || "folder-card".equals(id) || "file-library-card".equals(id) || "file-history-card".equals(id) || "transfer-card".equals(id) || "share-card".equals(id)
                 || "connection-metrics".equals(id)) {
                 setBackground(shape("connection-metrics".equals(id) || "tools".equals(id) ? tonal() : surface(), 18));
                 setClipToOutline(true);
@@ -1748,7 +2291,7 @@ final class NativeRemoteUi {
         private final ImageView glyph;
         private final TextView caption;
 
-        MoreTile(String id) {
+        MoreTile(String id, String actionId) {
             super(activity);
             this.id = id;
             setOrientation(VERTICAL);
@@ -1756,7 +2299,7 @@ final class NativeRemoteUi {
             setMinimumHeight(dp(compactMoreSheet ? 52 : 80));
             int verticalPadding = dp(compactMoreSheet ? 4 : 8);
             setPadding(dp(MORE_TILE_PADDING_DP), verticalPadding, dp(MORE_TILE_PADDING_DP), verticalPadding);
-            setOnClickListener(v -> emit(id, null));
+            setOnClickListener(v -> emit(actionId, null));
             setFocusable(true);
 
             glyph = new ImageView(activity);
@@ -1796,6 +2339,69 @@ final class NativeRemoteUi {
         if (view.getLayout() == null) return 0;
         int height = view.getCompoundPaddingTop() + view.getLayout().getHeight() + view.getCompoundPaddingBottom();
         return Math.max(0, (view.getHeight() - height) / 2);
+    }
+
+    private final class ActionRow extends LinearLayout {
+        private final ImageView icon = new ImageView(activity), current = new ImageView(activity), chevron = new ImageView(activity);
+        private final TextView caption = label(14), supporting = label(12);
+        private String visualKey = "";
+        ActionRow() {
+            super(activity);
+            setOrientation(HORIZONTAL);
+            setGravity(Gravity.CENTER_VERTICAL);
+            setPadding(dp(14), dp(12), dp(14), dp(12));
+            setFocusable(true);
+            addView(icon, new LinearLayout.LayoutParams(dp(20), dp(20)));
+            LinearLayout copy = column();
+            caption.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            for (TextView text : new TextView[]{caption, supporting}) {
+                text.setGravity(Gravity.START);
+                text.setIncludeFontPadding(false);
+                text.setMaxLines(2);
+                text.setEllipsize(TextUtils.TruncateAt.END);
+                text.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                copy.addView(text);
+            }
+            LinearLayout.LayoutParams supportingParams = (LinearLayout.LayoutParams) supporting.getLayoutParams();
+            supportingParams.topMargin = dp(4);
+            LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, -2, 1);
+            copyParams.setMarginStart(dp(12));
+            copyParams.setMarginEnd(dp(12));
+            addView(copy, copyParams);
+            addView(current, new LinearLayout.LayoutParams(dp(20), dp(20)));
+            LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(dp(16), dp(16));
+            arrowParams.setMarginStart(dp(8));
+            addView(chevron, arrowParams);
+            for (ImageView image : new ImageView[]{icon, current, chevron}) image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+        void update(JSONObject item) {
+            String title = item.optString("label"), detail = item.optString("detail");
+            boolean enabled = item.optBoolean("enabled", true), selected = item.optBoolean("selected");
+            boolean disclosure = item.optBoolean("disclosure", true);
+            setText(caption, title); setText(supporting, detail);
+            supporting.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
+            setMinimumHeight(dp(detail.isEmpty() ? 56 : 72));
+            setEnabled(enabled); setClickable(enabled); setFocusable(enabled); setSelected(selected);
+            setAlpha(enabled ? 1f : .44f);
+            caption.setTextColor(selected || !disclosure ? accent() : ink());
+            supporting.setTextColor(muted());
+            current.setVisibility(selected ? View.VISIBLE : View.GONE);
+            chevron.setVisibility(disclosure ? View.VISIBLE : View.GONE);
+            setContentDescription(detail.isEmpty() ? title : title + "，" + detail);
+            String key = dark + ":" + selected + ":" + item.optString("icon");
+            if (!visualKey.equals(key)) {
+                visualKey = key;
+                setBackground(ripple(selected ? accentSoft() : tonal(), 16));
+                icon.setImageDrawable(NativeIcon.of(item.optString("icon"), accent(), dp(20)));
+                current.setImageDrawable(NativeIcon.of("check-circle", accent(), dp(20)));
+                chevron.setImageDrawable(NativeIcon.of("next", muted(), dp(16)));
+            }
+        }
+        @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName(Button.class.getName());
+            info.setSelected(isSelected());
+        }
     }
 
     private final class ControlButton extends Button {
@@ -1856,6 +2462,9 @@ final class NativeRemoteUi {
         private final RectF outerRect = new RectF();
         private int pressed = -1;
         private int origin = -1;
+        private int activePointerId = -1;
+        private final String[] actionIds = new String[5];
+        private String heldAction;
         private float cx, cy, radius, innerRadius, centerRadius;
 
         DPadView() {
@@ -1876,6 +2485,11 @@ final class NativeRemoteUi {
         private int diameterDp = STANDARD_DIAL_DP;
 
         void bind(JSONArray keys, boolean enabled, String size) {
+            if (origin >= 0) {
+                JSONObject item = keys.optJSONObject(origin);
+                String next = item == null ? "" : item.optString("actionId", item.optString("id"));
+                if (!enabled || !next.equals(actionIds[origin])) cancelPress();
+            }
             int diameter = "small".equals(size) ? 176 : "large".equals(size) ? 256 : STANDARD_DIAL_DP;
             if (diameterDp != diameter) {
                 diameterDp = diameter;
@@ -1884,14 +2498,42 @@ final class NativeRemoteUi {
             for (int i = 0; i < getChildCount(); i++) {
                 JSONObject item = keys.optJSONObject(i);
                 View key = getChildAt(i);
+                String actionId = item.optString("actionId", item.optString("id"));
+                actionIds[i] = actionId;
                 key.setTag(item.optString("id"));
+                key.setOnClickListener(v -> emit(actionId, null));
                 key.setContentDescription(item.optString("label"));
                 key.setEnabled(enabled);
             }
-            if (!enabled) pressed = origin = -1;
+            if (!enabled) cancelPress();
+        }
+
+        private void cancelPress() {
+            String previous = heldAction;
+            heldAction = null;
+            pressed = origin = -1;
+            activePointerId = -1;
+            if (previous != null) emit(previous, false);
+            invalidate();
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            cancelPress();
+            super.onDetachedFromWindow();
+        }
+
+        @Override public void onWindowFocusChanged(boolean focused) {
+            super.onWindowFocusChanged(focused);
+            if (!focused) cancelPress();
+        }
+
+        @Override protected void onVisibilityChanged(View changedView, int visibility) {
+            super.onVisibilityChanged(changedView, visibility);
+            if (visibility != View.VISIBLE) cancelPress();
         }
 
         @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            if (changed && origin >= 0) cancelPress();
             super.onLayout(changed, l, t, r, b);
             updateGeometry(r - l, b - t);
             float mid = (radius + innerRadius) / 2f;
@@ -2003,22 +2645,30 @@ final class NativeRemoteUi {
 
         @Override public boolean onTouchEvent(MotionEvent event) {
             if (!isEnabled()) return false;
+            if (event.getActionMasked() == MotionEvent.ACTION_UP && event.getPointerId(event.getActionIndex()) != activePointerId) return true;
             int target = zone(event.getX(), event.getY());
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
+                    cancelPress();
                     if (target < 0) return false;
+                    if (!getChildAt(target).isEnabled()) return false;
                     getParent().requestDisallowInterceptTouchEvent(true);
                     pressed = origin = target;
+                    activePointerId = event.getPointerId(event.getActionIndex());
+                    if (target < 4) {
+                        heldAction = actionIds[target];
+                        emit(heldAction, true);
+                    }
                     break;
                 case MotionEvent.ACTION_MOVE:
-                    pressed = target == origin ? origin : -1;
+                    if (target != origin) cancelPress();
                     break;
                 case MotionEvent.ACTION_UP:
-                    if (target == origin && origin >= 0) getChildAt(origin).performClick();
+                    if (target == origin && origin == 4) getChildAt(origin).performClick();
                     // fall through to release the highlight
                 case MotionEvent.ACTION_CANCEL:
                 case MotionEvent.ACTION_POINTER_DOWN:
-                    pressed = origin = -1;
+                    cancelPress();
                     break;
             }
             invalidate();
@@ -2051,6 +2701,12 @@ final class NativeRemoteUi {
 
     private final class TouchPadView extends TextView {
         private final TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final NativeIcon.Cache mouse = new NativeIcon.Cache(), pointer = new NativeIcon.Cache();
+        private String cachedCaption, cachedHint;
+        private int captionWidth = -1, hintWidth = -1;
+        private float captionSize, hintSize, hintTextWidth;
+        private CharSequence captionText;
+        private StaticLayout hintLayout;
         String caption = "";
         String status = "", hint = "";
         TouchPadView() { super(activity); setTextSize(14); }
@@ -2062,13 +2718,19 @@ final class NativeRemoteUi {
                 for (int y = step / 2; y < getHeight(); y += step) canvas.drawCircle(x, y, dp(1), paint);
             paint.setColor(muted());
             paint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11, getResources().getDisplayMetrics()));
-            Drawable mouse = NativeIcon.of("mouse", muted(), dp(16));
+            Drawable mouseIcon = mouse.get("mouse", muted(), dp(16));
             canvas.save();
             canvas.translate(dp(12), dp(10));
-            mouse.draw(canvas);
+            mouseIcon.draw(canvas);
             canvas.restore();
             int headerWidth = Math.max(0, getWidth() - dp(56));
-            CharSequence name = TextUtils.ellipsize(caption, paint, headerWidth, TextUtils.TruncateAt.END);
+            if (captionWidth != headerWidth || captionSize != paint.getTextSize() || !caption.equals(cachedCaption)) {
+                cachedCaption = caption;
+                captionWidth = headerWidth;
+                captionSize = paint.getTextSize();
+                captionText = TextUtils.ellipsize(caption, paint, headerWidth, TextUtils.TruncateAt.END);
+            }
+            CharSequence name = captionText;
             float baseline = dp(18) - (paint.ascent() + paint.descent()) / 2;
             canvas.drawText(name, 0, name.length(), dp(33), baseline, paint);
             float statusWidth = headerWidth - paint.measureText(name, 0, name.length());
@@ -2083,10 +2745,10 @@ final class NativeRemoteUi {
             int iconBlock = iconSize + dp(7);
             Layout label = getLayout();
             int labelHeight = label == null ? 0 : label.getHeight();
-            Drawable pointer = NativeIcon.of("pointer", isEnabled() ? accent() : muted(), iconSize);
+            Drawable pointerIcon = pointer.get("pointer", isEnabled() ? accent() : muted(), iconSize);
             canvas.save();
             canvas.translate((getWidth() - iconSize) / 2f, (getHeight() - iconBlock - labelHeight) / 2f);
-            pointer.draw(canvas);
+            pointerIcon.draw(canvas);
             canvas.restore();
             canvas.save();
             canvas.translate(0, iconBlock / 2f);
@@ -2097,17 +2759,22 @@ final class NativeRemoteUi {
         private void drawGestureHint(Canvas canvas) {
             int width = getWidth() - dp(24);
             if (width <= 0 || hint.isEmpty()) return;
-            float hintWidth = paint.measureText(hint);
-            if (hintWidth <= width) {
-                canvas.drawText(hint, (getWidth() - hintWidth) / 2, getHeight() - dp(12), paint);
+            if (hintWidth != width || hintSize != paint.getTextSize() || !hint.equals(cachedHint)) {
+                cachedHint = hint;
+                hintWidth = width;
+                hintSize = paint.getTextSize();
+                hintTextWidth = paint.measureText(hint);
+                hintLayout = hintTextWidth <= width ? null : StaticLayout.Builder.obtain(hint, 0, hint.length(), paint, width)
+                    .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false)
+                    .setMaxLines(2).setEllipsize(TextUtils.TruncateAt.END).build();
+            }
+            if (hintLayout == null) {
+                canvas.drawText(hint, (getWidth() - hintTextWidth) / 2, getHeight() - dp(12), paint);
                 return;
             }
-            StaticLayout layout = StaticLayout.Builder.obtain(hint, 0, hint.length(), paint, width)
-                .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false)
-                .setMaxLines(2).setEllipsize(TextUtils.TruncateAt.END).build();
             canvas.save();
-            canvas.translate(dp(12), getHeight() - dp(9) - layout.getHeight());
-            layout.draw(canvas);
+            canvas.translate(dp(12), getHeight() - dp(9) - hintLayout.getHeight());
+            hintLayout.draw(canvas);
             canvas.restore();
         }
     }
@@ -2120,7 +2787,7 @@ final class NativeRemoteUi {
         } else if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             pointer(view, event, target, "down", event.getActionIndex());
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
-            if ("pad".equals(target) && Build.VERSION.SDK_INT >= 33 && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
+            if (Build.VERSION.SDK_INT >= 33 && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
                 pointer(view, event, target, "lost", event.getActionIndex());
                 return;
             }
@@ -2159,16 +2826,21 @@ final class NativeRemoteUi {
     private void renderSheet(JSONObject state) {
         String key = state.isNull("sheetKey") ? "" : state.optString("sheetKey");
         if (key.isEmpty()) { dismiss(); return; }
-        boolean changed = !key.equals(sheetKey);
+        String owner = state.optString("dismissAction", "dismiss");
+        boolean ownerChanged = !owner.equals(sheetAction);
+        boolean changed = !key.equals(sheetKey) || ownerChanged;
         boolean compactGrid = "more".equals(key) && wide && root.getHeight() <= dp(500);
         boolean densityChanged = compactMoreSheet != compactGrid;
         compactMoreSheet = compactGrid;
         sheetKey = key;
+        sheetAction = owner;
         if (dialog == null) createSheet();
+        if (ownerChanged) bindSheetHandle(owner);
+        dialog.setOnCancelListener(ignored -> emit(owner, null));
         if (densityChanged) sheetContent.removeAllViews();
         if (changed || densityChanged) {
             sheetLayout.setPadding(dp(SHEET_GUTTER_DP), 0, dp(SHEET_GUTTER_DP), dp(compactGrid ? 8 : 24));
-            sheetTitle.setPadding(0, 0, 0, dp(compactGrid ? 4 : 12));
+            sheetHeader.setPadding(0, 0, 0, dp(compactGrid ? 4 : 12));
             sheetScroll.scrollTo(0, 0);
             sheetLayout.expanded = false;
             setHandleLabel();
@@ -2176,8 +2848,8 @@ final class NativeRemoteUi {
         }
         if (sheetLayout.getBackground() == null || sheetLayout.darkSurface != dark) {
             sheetLayout.darkSurface = dark;
-            GradientDrawable sheetBackground = shape(surface(), 28);
-            int corner = dp(28);
+            GradientDrawable sheetBackground = shape(surface(), UiStyle.SHEET_RADIUS);
+            int corner = dp(UiStyle.SHEET_RADIUS);
             sheetBackground.setCornerRadii(new float[]{corner, corner, corner, corner, 0, 0, 0, 0});
             sheetLayout.setBackground(sheetBackground);
         }
@@ -2187,6 +2859,9 @@ final class NativeRemoteUi {
         if (Build.VERSION.SDK_INT >= 28 && !TextUtils.equals(title, sheetLayout.getAccessibilityPaneTitle()))
             sheetLayout.setAccessibilityPaneTitle(title);
         setText(sheetTitle, title);
+        JSONArray actions = state.optJSONArray("sheetActions");
+        sheetHeaderActions.setVisibility(actions == null || actions.length() == 0 ? View.GONE : View.VISIBLE);
+        reconcile(sheetHeaderActions, actions, true);
         String preview = state.optString("sheetIcon");
         String previewStyle = preview + dark;
         if (!previewStyle.equals(sheetTitle.getTag())) {
@@ -2197,7 +2872,28 @@ final class NativeRemoteUi {
         JSONArray items = state.optJSONArray("sheet");
         if ("more".equals(key) && items != null) items = moreLayout(items);
         if (key.startsWith("icon-") && items != null) items = iconLayout(items);
-        reconcile(sheetContent, items, false);
+        if ("custom-key-editor".equals(key) && wide && items != null) items = customKeyLayout(items);
+        JSONArray toolbar = new JSONArray(), body = new JSONArray();
+        if (items != null) for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            if ("choice-search".equals(item.optString("id")) || "applications-search".equals(item.optString("id"))) toolbar.put(item);
+            else body.put(item);
+        }
+        sheetToolbar.setVisibility(toolbar.length() == 0 ? View.GONE : View.VISIBLE);
+        reconcile(sheetToolbar, toolbar, false);
+        reconcile(sheetContent, body, false);
+        JSONArray footer = state.optJSONArray("sheetFooter");
+        boolean hasFooter = footer != null && footer.length() > 0;
+        sheetFooter.setVisibility(hasFooter ? View.VISIBLE : View.GONE);
+        reconcile(sheetFooter, footer, false);
+        LinearLayout.LayoutParams scrolling = (LinearLayout.LayoutParams) sheetScroll.getLayoutParams();
+        int scrollingHeight = hasFooter ? 0 : ViewGroup.LayoutParams.WRAP_CONTENT;
+        float scrollingWeight = hasFooter ? 1 : 0;
+        if (scrolling.height != scrollingHeight || scrolling.weight != scrollingWeight) {
+            scrolling.height = scrollingHeight; scrolling.weight = scrollingWeight;
+            sheetScroll.setLayoutParams(scrolling);
+        }
     }
 
     private JSONArray iconLayout(JSONArray items) {
@@ -2294,14 +2990,77 @@ final class NativeRemoteUi {
             }
         };
         handle.setFocusable(true);
-        handle.setOnClickListener(v -> { if (sheetLayout.expandable) expandSheet(); else dialog.cancel(); });
+        bindSheetHandle(sheetAction);
+        sheetLayout.addView(handle, new LinearLayout.LayoutParams(-1, dp(48)));
+        sheetTitle = label(20);
+        sheetTitle.setTypeface(null, Typeface.BOLD);
+        markHeading(sheetTitle);
+        sheetHeader = new LinearLayout(activity);
+        sheetHeader.setGravity(Gravity.CENTER_VERTICAL);
+        sheetHeader.setPadding(0, 0, 0, dp(12));
+        sheetHeader.addView(sheetTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        sheetHeaderActions = new LinearLayout(activity);
+        sheetHeaderActions.setTag("row:sheet-header-actions");
+        sheetHeaderActions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-2, -2);
+        actionsParams.setMarginStart(dp(8));
+        sheetHeader.addView(sheetHeaderActions, actionsParams);
+        sheetLayout.addView(sheetHeader);
+        sheetToolbar = column();
+        sheetToolbar.setPadding(0, 0, 0, dp(8));
+        sheetLayout.addView(sheetToolbar);
+        sheetScroll = new ScrollView(activity);
+        sheetContent = column();
+        sheetScroll.addView(sheetContent);
+        sheetLayout.addView(sheetScroll, new LinearLayout.LayoutParams(-1, -2));
+        sheetFooter = new LinearLayout(activity) {
+            private final Paint divider = new Paint(Paint.ANTI_ALIAS_FLAG);
+            @Override protected void onDraw(Canvas canvas) {
+                super.onDraw(canvas);
+                divider.setColor(edge());
+                canvas.drawRect(0, 0, getWidth(), dp(1), divider);
+            }
+        };
+        sheetFooter.setOrientation(LinearLayout.VERTICAL);
+        sheetFooter.setWillNotDraw(false);
+        sheetFooter.setPadding(0, dp(12), 0, 0);
+        sheetFooter.setVisibility(View.GONE);
+        sheetLayout.addView(sheetFooter, new LinearLayout.LayoutParams(-1, -2));
+        FrameLayout backdrop = new FrameLayout(activity);
+        backdrop.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        Dialog owner = dialog;
+        backdrop.setOnClickListener(view -> { if (dialog == owner) owner.cancel(); });
+        sheetLayout.setClickable(true);
+        backdrop.addView(sheetLayout, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        dialog.setContentView(backdrop);
+        dialog.setCanceledOnTouchOutside(true);
+        Window window = dialog.getWindow();
+        window.setGravity(Gravity.BOTTOM);
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setDimAmount(.40f);
+        dialog.show();
+        resizeDialog();
+    }
+
+    private void bindSheetHandle(String owner) {
+        handle.setPressed(false);
+        sheetLayout.animate().cancel();
+        sheetLayout.setTranslationY(0);
+        sheetLayout.dragHeight = -1;
+        handle.setOnClickListener(v -> { if (!owner.equals(sheetAction)) return; if (sheetLayout.expandable) expandSheet(); else dialog.cancel(); });
         setHandleLabel();
         handle.setOnTouchListener(new View.OnTouchListener() {
             private float start;
             private int startHeight;
+            private boolean tracking;
             @Override public boolean onTouch(View view, MotionEvent event) {
+                if (!owner.equals(sheetAction)) return true;
+                if (event.getActionMasked() != MotionEvent.ACTION_DOWN && !tracking) return true;
                 switch (event.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        tracking = true;
                         sheetLayout.animate().cancel();
                         start = event.getRawY();
                         startHeight = sheetLayout.getHeight();
@@ -2318,10 +3077,12 @@ final class NativeRemoteUi {
                         sheetLayout.setTranslationY(Math.max(0, delta - consumed) * .55f);
                         return true;
                     case MotionEvent.ACTION_CANCEL:
+                        tracking = false;
                         view.setPressed(false);
                         resetSheetOffset();
                         return true;
                     case MotionEvent.ACTION_UP:
+                        tracking = false;
                         float distance = event.getRawY() - start;
                         view.setPressed(false);
                         resetSheetOffset();
@@ -2336,27 +3097,6 @@ final class NativeRemoteUi {
                 }
             }
         });
-        sheetLayout.addView(handle, new LinearLayout.LayoutParams(-1, dp(48)));
-        sheetTitle = label(20);
-        sheetTitle.setPadding(0, 0, 0, dp(12));
-        sheetTitle.setTypeface(null, Typeface.BOLD);
-        markHeading(sheetTitle);
-        sheetLayout.addView(sheetTitle);
-        sheetScroll = new ScrollView(activity);
-        sheetContent = column();
-        sheetScroll.addView(sheetContent);
-        sheetLayout.addView(sheetScroll, new LinearLayout.LayoutParams(-1, -2));
-        dialog.setContentView(sheetLayout);
-        dialog.setCanceledOnTouchOutside(true);
-        dialog.setOnCancelListener(ignored -> emit("dismiss", null));
-        Window window = dialog.getWindow();
-        window.setGravity(Gravity.BOTTOM);
-        window.setBackgroundDrawableResource(android.R.color.transparent);
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setDimAmount(.40f);
-        dialog.show();
-        resizeDialog();
     }
 
     private void setHandleLabel() {
@@ -2380,15 +3120,21 @@ final class NativeRemoteUi {
         Window window = dialog.getWindow();
         int width = root.getWidth() > maxWidth ? maxWidth : ViewGroup.LayoutParams.MATCH_PARENT;
         WindowManager.LayoutParams params = window.getAttributes();
-        if (params.width != width || params.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
-            window.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        if (params.width != width || params.height != ViewGroup.LayoutParams.MATCH_PARENT) {
+            window.setLayout(width, ViewGroup.LayoutParams.MATCH_PARENT);
         }
     }
     private void dismiss() {
-        if (dialog != null) { dialog.dismiss(); dialog = null; }
+        sheetAction = "";
         sheetKey = "";
+        if (dialog != null) { Dialog previous = dialog; dialog = null; previous.dismiss(); }
     }
     void destroy() {
+        if (destroyed) return;
+        resetWindowTouch();
+        volumeKeys.reset();
+        destroyed = true;
+        latest = null;
         if (permissionHint != null) permissionHint.dismiss();
         dismiss();
         if (microphoneCapsule != null) root.removeView(microphoneCapsule);
@@ -2492,6 +3238,7 @@ final class NativeRemoteUi {
         }
     }
     private final class SheetLayout extends LinearLayout {
+        private final Rect viewport = new Rect();
         private boolean expanded, expandable;
         private int collapsedHeight, fullHeight, dragHeight = -1;
         private boolean imeVisible;
@@ -2514,12 +3261,27 @@ final class NativeRemoteUi {
             int visible = Math.min(available, root.getHeight() > 0 ? root.getHeight() : available);
             int limit = Math.max(0, visible - dp(12));
             View draft = sheetContent == null ? null : sheetContent.findViewWithTag("edit:draft");
-            android.graphics.Rect viewport = new android.graphics.Rect();
             getWindowVisibleDisplayFrame(viewport);
-            boolean typing = imeVisible || (viewport.height() > 0 && root.getHeight() - viewport.height() >= dp(120));
+            WindowInsets currentInsets = getRootWindowInsets();
+            boolean typing = Build.VERSION.SDK_INT >= 30 && currentInsets != null
+                ? currentInsets.isVisible(WindowInsets.Type.ime())
+                : imeVisible || (viewport.height() > 0 && root.getHeight() - viewport.height() >= dp(120));
+            boolean searchable = sheetToolbar != null && sheetToolbar.getVisibility() == View.VISIBLE;
+            boolean shortSearch = searchable && typing && visible < dp(280);
+            boolean compactFooter = sheetFooter != null && sheetFooter.getVisibility() == View.VISIBLE && visible < dp(280);
+            boolean compactHeader = shortSearch || compactFooter;
+            int headerVisibility = compactHeader ? View.GONE : View.VISIBLE;
+            if (handle.getVisibility() != headerVisibility) handle.setVisibility(headerVisibility);
+            if (sheetHeader.getVisibility() != headerVisibility) sheetHeader.setVisibility(headerVisibility);
+            int topPadding = compactHeader ? dp(8) : 0;
+            int bottomPadding = shortSearch ? 0 : dp(compactFooter || compactMoreSheet ? 8 : 24);
+            if (getPaddingTop() != topPadding || getPaddingBottom() != bottomPadding)
+                setPadding(getPaddingLeft(), topPadding, getPaddingRight(), bottomPadding);
+            int toolbarBottom = shortSearch ? 0 : dp(8);
+            if (sheetToolbar.getPaddingBottom() != toolbarBottom) sheetToolbar.setPadding(0, 0, 0, toolbarBottom);
             int fieldHeight = typing ? dp(64) : Math.max(dp(64), Math.min(dp(160), limit - dp(330)));
             if (draft instanceof EditText && draft.getMinimumHeight() != fieldHeight) draft.setMinimumHeight(fieldHeight);
-            super.onMeasure(width, MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST));
+            super.onMeasure(width, MeasureSpec.makeMeasureSpec(limit, searchable ? MeasureSpec.EXACTLY : MeasureSpec.AT_MOST));
             fullHeight = getMeasuredHeight();
             collapsedHeight = Math.min(fullHeight, typing || compactMoreSheet ? limit : Math.round(visible * .88f));
             boolean canExpand = fullHeight - collapsedHeight > dp(2);

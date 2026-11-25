@@ -35,6 +35,9 @@ pub enum Command {
     Volume {
         action: Volume,
     },
+    Media {
+        action: Media,
+    },
     Switch {
         action: Switch,
     },
@@ -60,6 +63,11 @@ pub enum Command {
         confirmed: bool,
     },
     Release {},
+    Launch {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<String>,
+    },
     ListWindows {},
     SwitchToWindow {
         hwnd: u64,
@@ -82,23 +90,80 @@ pub enum Button {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[repr(u16)]
 pub enum Key {
-    Space,
-    Left,
-    Right,
-    Up,
-    Down,
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-    Delete,
-    Home,
-    End,
-    Pageup,
-    Pagedown,
-    F5,
-    F11,
+    Space = 0x20,
+    Left = 0x25,
+    Right = 0x27,
+    Up = 0x26,
+    Down = 0x28,
+    Enter = 0x0d,
+    Escape = 0x1b,
+    Backspace = 0x08,
+    Tab = 0x09,
+    Delete = 0x2e,
+    Home = 0x24,
+    End = 0x23,
+    Pageup = 0x21,
+    Pagedown = 0x22,
+    F1 = 0x70,
+    F2 = 0x71,
+    F3 = 0x72,
+    F4 = 0x73,
+    F5 = 0x74,
+    F6 = 0x75,
+    F7 = 0x76,
+    F8 = 0x77,
+    F9 = 0x78,
+    F10 = 0x79,
+    F11 = 0x7a,
+    F12 = 0x7b,
+    A = 0x41,
+    B = 0x42,
+    C = 0x43,
+    D = 0x44,
+    E = 0x45,
+    F = 0x46,
+    G = 0x47,
+    H = 0x48,
+    I = 0x49,
+    J = 0x4a,
+    K = 0x4b,
+    L = 0x4c,
+    M = 0x4d,
+    N = 0x4e,
+    O = 0x4f,
+    P = 0x50,
+    Q = 0x51,
+    R = 0x52,
+    S = 0x53,
+    T = 0x54,
+    U = 0x55,
+    V = 0x56,
+    W = 0x57,
+    X = 0x58,
+    Y = 0x59,
+    Z = 0x5a,
+    #[serde(rename = "0")]
+    Digit0 = 0x30,
+    #[serde(rename = "1")]
+    Digit1 = 0x31,
+    #[serde(rename = "2")]
+    Digit2 = 0x32,
+    #[serde(rename = "3")]
+    Digit3 = 0x33,
+    #[serde(rename = "4")]
+    Digit4 = 0x34,
+    #[serde(rename = "5")]
+    Digit5 = 0x35,
+    #[serde(rename = "6")]
+    Digit6 = 0x36,
+    #[serde(rename = "7")]
+    Digit7 = 0x37,
+    #[serde(rename = "8")]
+    Digit8 = 0x38,
+    #[serde(rename = "9")]
+    Digit9 = 0x39,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,33 +171,16 @@ pub enum Modifier {
     Ctrl,
     Alt,
     Shift,
+    Win,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub type ComboKey = Key;
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ComboKey {
-    Space,
-    Left,
-    Right,
-    Up,
-    Down,
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-    Home,
-    End,
-    Pageup,
-    Pagedown,
-    F5,
-    F11,
-    A,
-    C,
-    F,
-    V,
-    W,
-    X,
-    Y,
-    Z,
+pub enum Media {
+    Playpause,
+    Previous,
+    Next,
+    Stop,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -169,6 +217,7 @@ pub enum ClientMessage {
         token: String,
     },
     Ping {},
+    Standby {},
     #[serde(rename = "qftOpen")]
     QftOpen {},
     #[serde(rename = "qftStage")]
@@ -186,7 +235,7 @@ impl Command {
             }
             Self::Scroll { dx, dy } => dx.abs_diff(0) <= 600 && dy.abs_diff(0) <= 600,
             Self::Combo { modifiers, .. } => {
-                (1..=3).contains(&modifiers.len())
+                (1..=4).contains(&modifiers.len())
                     && (0..modifiers.len()).all(|i| !modifiers[i + 1..].contains(&modifiers[i]))
             }
             Self::Click { count, .. } => *count == 1 || *count == 2,
@@ -196,6 +245,13 @@ impl Command {
                     && !text
                         .chars()
                         .any(|c| (c < ' ' && !['\r', '\n', '\t'].contains(&c)) || c == '\u{7f}')
+            }
+            Self::Launch { id, request } => {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && request.as_deref().is_none_or(crate::launcher::valid_id)
             }
             Self::Shutdown { confirmed } => *confirmed,
             _ => true,

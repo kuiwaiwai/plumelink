@@ -1,5 +1,9 @@
 import { z } from "zod";
+import { keyboardKeys, keyboardModifiers } from "./keyboard";
+export { keyboardKeys, keyboardModifiers } from "./keyboard";
 export const commandSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("media"), action: z.enum(["playpause", "previous", "next", "stop"]) }).strict(),
+  z.object({ type: z.literal("launch"), id: z.string().regex(/^[a-f0-9]{32}$/), request: z.string().regex(/^[a-f0-9]{32}$/).optional() }).strict(),
   z.object({ type: z.literal("motion"), dx: z.number().int().min(-500).max(500),
     dy: z.number().int().min(-500).max(500), scroll: z.number().int().min(-600).max(600) }).strict(),
   z
@@ -27,59 +31,18 @@ export const commandSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("key"),
-      key: z.enum([
-        "space",
-        "left",
-        "right",
-        "up",
-        "down",
-        "enter",
-        "escape",
-        "backspace",
-        "tab",
-        "delete",
-        "home",
-        "end",
-        "pageup",
-        "pagedown",
-        "f5",
-        "f11",
-      ]),
+      key: z.enum(keyboardKeys),
     })
     .strict(),
   z
     .object({
       type: z.literal("combo"),
       modifiers: z
-        .array(z.enum(["ctrl", "alt", "shift"]))
+        .array(z.enum(keyboardModifiers))
         .min(1)
-        .max(3)
+        .max(4)
         .refine((list) => new Set(list).size === list.length),
-      key: z.enum([
-        "space",
-        "left",
-        "right",
-        "up",
-        "down",
-        "enter",
-        "escape",
-        "backspace",
-        "tab",
-        "home",
-        "end",
-        "pageup",
-        "pagedown",
-        "f5",
-        "f11",
-        "a",
-        "c",
-        "f",
-        "v",
-        "w",
-        "x",
-        "y",
-        "z",
-      ]),
+      key: z.enum(keyboardKeys),
     })
     .strict(),
   z
@@ -128,11 +91,24 @@ export const clientSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("qftOpen") }).strict(),
   z.object({ kind: z.literal("qftStage"), id: z.number().int().min(1).max(2147483647), command: commandSchema }).strict(),
 ]);
+export type ReceiveAction = "cancel" | "clear" | "open";
+export interface ReceivedFile {
+  taskId: string;
+  name: string;
+  size: number;
+  receivedBytes: number;
+  state: "receiving" | "saving" | "stopping" | "completed" | "stopped";
+  deviceName?: string;
+  error?: string;
+}
 export interface DesktopState {
+  receivedFiles?: ReceivedFile[];
+  lanRunning?: boolean;
   microphone?: {
     active: boolean; deviceName: string; endpointName: string; error: string;
     droppedFrames: number; receivedFrames: number; receivedSignalFrames: number;
     renderedSamples: number; renderedSignalSamples: number; inputLevel: number; outputLevel: number;
+    gainClippedSamples: number; clipping: boolean;
   };
   discovery: { active: boolean; error: string };
   admin: { active: boolean };

@@ -8,7 +8,7 @@ public class NativeIconTest {
         String[] icons = {
             "star", "bolt", "bell", "grid", "monitor", "pointer", "volume", "search",
             "switch", "left", "right", "layers", "keyboard", "command", "mic", "gamepad",
-            "settings", "activity", "heart", "idea"
+            "settings", "activity", "heart", "idea", "play", "previous", "nexttrack", "stop", "alert-circle", "check-circle"
         };
         for (String icon : icons) assertNotNull(icon, NativeIcon.parse(icon));
     }

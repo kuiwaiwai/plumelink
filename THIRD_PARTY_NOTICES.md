@@ -16,10 +16,13 @@
 | Zod | MIT | 共享 TypeScript 协议与契约验证 |
 | Vite / Playwright / TypeScript | 各自 MIT 或 Apache-2.0 | 仅开发构建和验证工具 |
 | Microsoft Edge WebView2 Runtime | Microsoft WebView2 分发条款 | 系统 WebView；缺少运行时才由安装向导联网下载 |
+| Android Debug Bridge / AdbWinApi / AdbWinUsbApi | Apache-2.0 及随附 NOTICE 中的许可 | Windows 内置 USB 连接组件 |
 
 ## 随包许可
 
 Windows 安装版附带 `THIRD_PARTY_LICENSES.txt`。Windows 主程序内嵌项目与依赖许可，运行时加上 `--licenses` 可将许可文本输出到终端或文件。Android 依赖的许可文本位于 APK 的 `assets/THIRD_PARTY_LICENSES-ANDROID.txt`。
+
+USB 组件取自 Google 官方 Android Platform-Tools，保留原始二进制及完整的 `usb/NOTICE.txt`，不附带 Android SDK 安装器。[ADB 源码与许可](https://android.googlesource.com/platform/packages/modules/adb/) · [Platform-Tools](https://developer.android.com/tools/releases/platform-tools)
 
 ## 可选音频驱动
 

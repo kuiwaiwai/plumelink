@@ -606,7 +606,9 @@
       "id": 6,
       "command": {
         "type": "combo",
-        "modifiers": ["ctrl"],
+        "modifiers": [
+          "ctrl"
+        ],
         "key": "c"
       }
     }
@@ -619,7 +621,10 @@
       "id": 7,
       "command": {
         "type": "combo",
-        "modifiers": ["ctrl", "ctrl"],
+        "modifiers": [
+          "ctrl",
+          "ctrl"
+        ],
         "key": "c"
       }
     }
@@ -634,6 +639,217 @@
         "type": "combo",
         "modifiers": [],
         "key": "c"
+      }
+    }
+  },
+  {
+    "name": "launch-id",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "launch",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "launch-path-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "launch",
+        "id": "C:/Windows/notepad.exe"
+      }
+    }
+  },
+  {
+    "name": "launch-args-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "launch",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "args": "/unsafe"
+      }
+    }
+  },
+  {
+    "name": "launch-long-id-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "launch",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "media-playpause",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "playpause"
+      }
+    }
+  },
+  {
+    "name": "media-previous",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "previous"
+      }
+    }
+  },
+  {
+    "name": "media-next",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "next"
+      }
+    }
+  },
+  {
+    "name": "media-stop",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "stop"
+      }
+    }
+  },
+  {
+    "name": "media-toggle",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "toggle"
+      }
+    }
+  },
+  {
+    "name": "media-extra-rejected",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "media",
+        "action": "next",
+        "target": "player"
+      }
+    }
+  },
+  {
+    "name": "save-combination",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "combo",
+        "modifiers": [
+          "ctrl"
+        ],
+        "key": "s"
+      }
+    }
+  },
+  {
+    "name": "windows-combination",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "combo",
+        "modifiers": [
+          "win",
+          "ctrl"
+        ],
+        "key": "right"
+      }
+    }
+  },
+  {
+    "name": "four-modifiers",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "combo",
+        "modifiers": [
+          "ctrl",
+          "alt",
+          "shift",
+          "win"
+        ],
+        "key": "f12"
+      }
+    }
+  },
+  {
+    "name": "number-key",
+    "valid": true,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "key",
+        "key": "0"
+      }
+    }
+  },
+  {
+    "name": "unsupported-function-key",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "key",
+        "key": "f99"
+      }
+    }
+  },
+  {
+    "name": "duplicate-win-modifier",
+    "valid": false,
+    "message": {
+      "kind": "qftStage",
+      "id": 1,
+      "command": {
+        "type": "combo",
+        "modifiers": [
+          "win",
+          "win"
+        ],
+        "key": "e"
       }
     }
   }

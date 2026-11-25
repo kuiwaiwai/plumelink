@@ -32,6 +32,7 @@ const {
   saveHaloSize,
   setPort,
   transfer,
+  receiveAction,
   deviceAction,
   adminAction,
 } = useDesktop();
@@ -134,7 +135,7 @@ onUnmounted(() => clearTimeout(revokeAllTimer));
         <DevicesView :state="state" :busy="busy" @add-device="navigate('overview'); showPairing = true" @device-action="handleDeviceAction" @admin-action="adminAction" />
       </div>
       <div v-show="activeSection === 'transfer'" class="workspace-view" data-view="transfer">
-        <TransferView :state="state" :busy="busy" @transfer="transfer" />
+        <TransferView :state="state" :busy="busy" :receive-action="receiveAction" @transfer="transfer" />
       </div>
       <div v-show="activeSection === 'settings'" class="workspace-view" data-view="settings">
         <SettingsView v-model:selected="selected" v-model:halo-size="haloSize" :state="state" :busy="busy" :saving-halo-size="savingHaloSize" :set-port="setPort" @action="action" @save-halo-size="saveHaloSize" />

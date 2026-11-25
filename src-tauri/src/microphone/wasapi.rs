@@ -1,7 +1,7 @@
-use super::{Endpoint, Status, Stream, RATE};
+use super::{Endpoint, EndpointVolume, EndpointVolumes, Status, Stream, RATE};
 use std::time::Duration;
 use windows::{
-    core::{w, PCWSTR},
+    core::{w, Interface, PCWSTR},
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_TIMEOUT},
@@ -342,6 +342,36 @@ pub(super) fn endpoints() -> Result<Vec<Endpoint>, String> {
 pub(super) fn recording_endpoints() -> Result<Vec<Endpoint>, String> {
     list_endpoints(eCapture)
 }
+
+pub(super) fn endpoint_volumes(output: &str, recording: &str) -> EndpointVolumes {
+    let initialized = Com::init();
+    let read = |id: &str, flow| {
+        if id.is_empty() { return None; }
+        let mut result = EndpointVolume::unavailable(id, "无法读取设备音量，请刷新设备状态。");
+        if initialized.is_err() || id.len() > 4096 || id.contains('\0') { return Some(result); }
+        unsafe {
+            let device = (|| -> windows::core::Result<IMMDevice> {
+                let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+                let wide: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
+                let device = enumerator.GetDevice(PCWSTR(wide.as_ptr()))?;
+                if device.GetState()? != DEVICE_STATE_ACTIVE || device.cast::<IMMEndpoint>()?.GetDataFlow()? != flow {
+                    return Err(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG));
+                }
+                Ok(device)
+            })();
+            let Ok(device) = device else { result.error = "所选音频设备已断开".into(); return Some(result); };
+            if let Ok(volume) = device.Activate::<Endpoints::IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                result.volume_percent = volume.GetMasterVolumeLevelScalar().ok()
+                    .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                    .map(|value| (value * 100.0).round() as u8);
+                result.muted = volume.GetMute().ok().map(|value| value.as_bool());
+                if result.volume_percent.is_some() && result.muted.is_some() { result.error.clear(); }
+            }
+        }
+        Some(result)
+    };
+    EndpointVolumes { output: read(output, eRender), recording: read(recording, eCapture) }
+}
 fn list_endpoints(flow: EDataFlow) -> Result<Vec<Endpoint>, String> {
     let _com = Com::init()?;
     unsafe {
@@ -484,6 +514,35 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_or_invalid_device_ids_never_look_like_zero_volume_or_unmuted() {
+        for id in ["missing-endpoint".to_owned(), "device\0suffix".to_owned(), "x".repeat(4097)] {
+            let value = endpoint_volumes(&id, "").output.unwrap();
+            assert_eq!(value.id, id);
+            assert!(value.volume_percent.is_none() && value.muted.is_none());
+            assert!(!value.error.is_empty());
+        }
+    }
+
+    #[test]
+    fn available_endpoint_queries_are_read_only_and_reject_the_wrong_direction() {
+        let outputs = endpoints().unwrap_or_default();
+        let recordings = recording_endpoints().unwrap_or_default();
+        let output = outputs.first().map(|device| device.id.as_str()).unwrap_or("");
+        let recording = recordings.first().map(|device| device.id.as_str()).unwrap_or("");
+        let value = endpoint_volumes(output, recording);
+        for endpoint in [&value.output, &value.recording].into_iter().flatten() {
+            assert!(endpoint.volume_percent.is_none_or(|percent| percent <= 100));
+            if endpoint.error.is_empty() { assert!(endpoint.volume_percent.is_some() && endpoint.muted.is_some()); }
+        }
+        if !output.is_empty() {
+            let wrong = endpoint_volumes("", output).recording.unwrap();
+            assert!(wrong.volume_percent.is_none() && wrong.muted.is_none());
+            assert!(!wrong.error.is_empty());
+        }
+        println!("Endpoint volume query: outputs={}, recordings={}, {}", outputs.len(), recordings.len(), serde_json::to_string(&value).unwrap());
+    }
 
     #[test]
     fn write_budget_follows_device_period_and_never_accumulates_padding() {

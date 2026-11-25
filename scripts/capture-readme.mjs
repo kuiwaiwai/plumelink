@@ -1,7 +1,6 @@
-// Desktop preview plus mobile captures from the QFT2 fixture; no real system input.
+// Desktop preview; Android screenshots come from the native app.
 import { createServer } from 'node:http';
-import { spawnSync } from 'node:child_process';
-import { readFile, mkdir, copyFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { chromium } from 'playwright';
 const root=resolve('tauri-dist'), output=resolve('artifacts/readme-previews');
@@ -24,8 +23,4 @@ try{
  await desktop.screenshot({path:resolve(output,'desktop-pairing.png'),fullPage:true});
 }finally{await browser.close();await new Promise(r=>server.close(r));}
 
-const verified=spawnSync(process.execPath,['scripts/verify-mobile-ui.mjs'],{stdio:'inherit',windowsHide:true});
-if(verified.error || verified.status!==0) throw verified.error || new Error('Mobile QFT2 screenshot verification failed');
-for(const [source,target] of [['remote-light','mobile-remote'],['actions','mobile-more'],['pair','mobile-pairing']])
- await copyFile(resolve('artifacts/android-ui',source+'.png'),resolve(output,target+'.png'));
-console.log('Captured desktop preview and verified QFT2 mobile UI; no real system input.');
+console.log('Captured desktop preview. Android screenshots are taken from the native app.');

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { isReadonly } from "vue";
+import { languagePreference } from "../shared/i18n";
 import { readFileSync } from "node:fs";
 import { classifyConnectionQuality, useConnection } from "../apps/mobile/connection";
 import { loadQftKernel, type Kernel } from "../apps/mobile/qft-transport";
@@ -12,9 +14,9 @@ class Socket {
   static OPEN=1;static CLOSING=2;static sockets:Socket[]=[];
   readyState=0;bufferedAmount=0;frames:any[]=[];
   onopen=()=>{};onmessage=(event:{data:string|ArrayBuffer})=>{};onclose=(event:{code:number;reason?:string})=>{};onerror=()=>{};
-  constructor(){Socket.sockets.push(this);}
+  constructor(readonly url=""){Socket.sockets.push(this);}
   send(frame:string|ArrayBuffer){this.frames.push(typeof frame === "string" ? JSON.parse(frame):frame);}
-  ready(extra:Record<string,unknown>={}){this.readyState=1;this.onopen();this.json({kind:"ready",qft:capability,...extra});}
+  ready(extra:Record<string,unknown>={}){this.readyState=1;this.onopen();this.json({kind:"ready",qft:capability,permissions:{input:true,text:true,files:true,power:false,microphone:false},...extra});}
   async open(extra:Record<string,unknown>={}){this.ready(extra);await vi.advanceTimersByTimeAsync(0);if(this.frames.some(f=>f.kind==="qftOpen"))this.onmessage({data:grant()});}
   json(frame:unknown){this.onmessage({data:JSON.stringify(frame)});}
   close(code=1000,reason=""){this.readyState=3;this.onclose({code,reason});}
@@ -26,7 +28,26 @@ beforeEach(()=>{
   const values=new Map([["plumelink-token","a".repeat(64)]]);
   vi.stubGlobal("localStorage",{getItem:(k:string)=>values.get(k),setItem:(k:string,v:string)=>values.set(k,v),removeItem:(k:string)=>values.delete(k)});
 });
-afterEach(()=>{vi.clearAllTimers();vi.useRealTimers();vi.unstubAllGlobals();});
+afterEach(()=>{languagePreference.value="system";vi.clearAllTimers();vi.useRealTimers();vi.unstubAllGlobals();});
+it("reports the Android name after authentication without delaying control",async()=>{
+  vi.stubGlobal("PlumeLinkAndroid",{getDeviceName:()=>"我的手机",getDeviceModel:()=>"2206122SC"});
+  const post=vi.fn(async()=>new Response(JSON.stringify({deviceName:"PC alias"}),{headers:{"Content-Type":"application/json"}}));
+  vi.stubGlobal("fetch",post);
+  const remote=useConnection();remote.resume();await Socket.sockets[0].open();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(post).toHaveBeenCalledTimes(1);
+  const [path,init]=post.mock.calls[0] as unknown as [string,RequestInit];
+  expect(path).toBe("/api/device/name");
+  expect(JSON.parse(init.body as string)).toEqual({name:"我的手机",model:"2206122SC"});
+  expect((init.headers as Headers).get("Authorization")).toBe("Bearer "+"a".repeat(64));
+  expect(remote.deviceName.value).toBe("PC alias");expect(remote.status.value).toBe("connected");remote.suspend();
+});
+it("a failed optional name report leaves pairing and control usable",async()=>{
+  vi.stubGlobal("PlumeLinkAndroid",{getDeviceName:()=>"My phone"});
+  vi.stubGlobal("fetch",vi.fn().mockRejectedValue(new TypeError("offline")));
+  const remote=useConnection();remote.resume();await Socket.sockets[0].open();
+  expect(remote.status.value).toBe("connected");expect(remote.token()).toBe("a".repeat(64));expect(remote.message.value).not.toContain("offline");remote.suspend();
+});
 it("requires the WASM lease before input and uses QFT2 exclusively",async()=>{
   const r=useConnection();r.resume();const ws=Socket.sockets[0];ws.ready();
   await expect(r.send({type:"key",key:"enter"})).rejects.toThrow("尚未连接");
@@ -78,6 +99,32 @@ it("suspend cancels the kernel, rejects pending action, and never replays",async
   expect(await done).toContain("不会自动重发");expect(new DataView(ws.frames.at(-1)).getUint8(4)).toBe(7);
   r.resume();await Socket.sockets[1].open();expect(Socket.sockets[1].frames.filter(f=>f.kind==="qftStage")).toHaveLength(0);r.suspend();
 });
+it("background handoff cancels input without a WebView reconnect and never replays on return",async()=>{
+  const remote=useConnection();remote.resume();const first=Socket.sockets[0];await first.open();
+  const pending=remote.send({type:"click",button:"left",count:1}).catch(error=>error.message);remote.releaseInput();
+  expect(await pending).toContain("不会自动重发");expect(new DataView(first.frames.at(-1)).getUint8(4)).toBe(7);
+  vi.stubGlobal("document",{hidden:true});await vi.advanceTimersByTimeAsync(120000);expect(Socket.sockets).toHaveLength(1);
+  vi.stubGlobal("document",{hidden:false});remote.resume();const second=Socket.sockets[1];await second.open();
+  expect(second.frames.some(frame=>frame.kind==="qftStage")).toBe(false);expect(remote.token()).toBe("a".repeat(64));remote.suspend();
+});
+it("waits for the native foreground owner before opening an input session",async()=>{
+  let foreground=false;
+  vi.stubGlobal("PlumeLinkAndroid",{isControlForegroundReady:()=>foreground});
+  const remote=useConnection();remote.resume();expect(Socket.sockets).toHaveLength(0);
+  foreground=true;remote.resume();await Socket.sockets[0].open();expect(remote.status.value).toBe("connected");remote.suspend();
+});
+it("processes a background credential revocation before reconnecting",()=>{
+  const setStoredToken=vi.fn();
+  vi.stubGlobal("PlumeLinkAndroid",{getConnectionKeepAliveState:()=>JSON.stringify({terminalCode:4003}),setStoredToken});
+  const remote=useConnection();remote.resume();expect(Socket.sockets).toHaveLength(0);
+  expect(remote.token()).toBe("");expect(setStoredToken).toHaveBeenCalledWith("");expect(remote.message.value).toContain("配对码");remote.suspend();
+});
+it("keeps pairing but blocks an expired background USB lease before reconnecting",()=>{
+  vi.stubGlobal("location",{protocol:"https:",host:"127.0.0.1:17840",hostname:"127.0.0.1"});
+  vi.stubGlobal("PlumeLinkAndroid",{getConnectionKeepAliveState:()=>JSON.stringify({terminalCode:4409})});
+  const remote=useConnection();remote.resume();expect(Socket.sockets).toHaveLength(0);expect(remote.usbExpired.value).toBe(true);
+  expect(remote.token()).toBe("a".repeat(64));remote.resume();expect(Socket.sockets).toHaveLength(0);remote.suspend();
+});
 it("duplicate ready and malformed evidence close the connection",async()=>{
   const r=useConnection();r.resume();const ws=Socket.sockets[0];await ws.open();ws.ready();expect(ws.readyState).toBe(3);
   r.resume();await Socket.sockets[1].open();Socket.sockets[1].onmessage({data:new ArrayBuffer(20)});expect(Socket.sockets[1].readyState).toBe(3);r.suspend();
@@ -98,6 +145,15 @@ it("network loss reconnects without replaying any action",async()=>{
   const r=useConnection();r.resume();await Socket.sockets[0].open();Socket.sockets[0].close(1006);
   await vi.advanceTimersByTimeAsync(750);await Socket.sockets[1].open({permissions:{input:true,text:true,files:true,power:false,microphone:false}});expect(r.status.value).toBe("connected");
   expect(Socket.sockets[1].frames).toEqual([{kind:"auth",token:"a".repeat(64)},{kind:"qftOpen"}]);r.suspend();
+});
+it("PC resume keeps pairing and reconnects without replaying a pending action",async()=>{
+  const remote=useConnection();remote.resume();const old=Socket.sockets[0];await old.open();
+  const pending=remote.send({type:"key",key:"enter"}).catch(error=>error.message);
+  old.close(4004);
+  expect(await pending).toContain("不会自动重发");expect(remote.token()).toBe("a".repeat(64));
+  await vi.advanceTimersByTimeAsync(750);const fresh=Socket.sockets[1];await fresh.open();
+  expect(remote.status.value).toBe("connected");
+  expect(fresh.frames).toEqual([{kind:"auth",token:"a".repeat(64)},{kind:"qftOpen"}]);remote.suspend();
 });
 it("permission and primary presence are updated without downgrading",async()=>{
   const r=useConnection();r.resume();await Socket.sockets[0].open({permissions:{input:true,text:false,files:true,power:false}});
@@ -372,4 +428,169 @@ it("keeps the window-list deadline active until the JSON body finishes", async (
   await vi.advanceTimersByTimeAsync(12_001);
   expect(aborted).toBe(true);
   expect(await result).toContain("超时");
+});
+
+it("normalizes window metadata and images without silently cutting the list", async () => {
+  const windows = Array.from({ length: 160 }, (_, i) => ({ hwnd: i + 1, title: "Window " + i, app: "sample.exe", minimized: false }));
+  const get = vi.fn(async () => new Response(JSON.stringify({ windows: [
+    ...windows,
+    { hwnd: 1, title: "Duplicate" },
+    { hwnd: 0, title: "Invalid" },
+    { hwnd: 1.5, title: "Invalid" },
+    { hwnd: Number.MAX_SAFE_INTEGER + 1, title: "Invalid" },
+    { hwnd: 500, title: "" },
+    { hwnd: 501, title: "x".repeat(2049) },
+    { hwnd: 502, title: "资料 📁", app: { path: "private" }, minimized: "false", icon: "https://example.com/tracker.png", extra: "discard" },
+    { hwnd: 503, title: "Unsupported image", app: "x".repeat(513), icon: "data:image/svg+xml,<svg/>", minimized: true },
+  ] })));
+  vi.stubGlobal("fetch", get);
+  const r = useConnection();
+  const entries = await r.listWindows();
+  expect(entries).toHaveLength(162);
+  expect(entries[159]).toEqual({ ...windows[159], icon: null });
+  expect(entries[160]).toEqual({ hwnd: 502, title: "资料 📁", app: "", minimized: false, icon: null });
+  expect(entries[161]).toEqual({ hwnd: 503, title: "Unsupported image", app: "", minimized: true, icon: null });
+  expect(get).toHaveBeenCalledTimes(1);
+  r.suspend();
+});
+
+it("keeps the API timeout active when headers arrive but the body stalls", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) =>
+    new Response(new ReadableStream({
+      start(controller) {
+        init.signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+      },
+    }), { status: 200 })));
+  const remote = useConnection();
+  const pending = remote.api("/api/files").catch(error => error);
+  await vi.advanceTimersByTimeAsync(12_000);
+  await expect(pending).resolves.toMatchObject({ message: "请求电脑超时，请检查连接后重试" });
+  expect(remote.token()).toBe("a".repeat(64));
+  remote.suspend();
+});
+
+it("preserves healthy LAN connections and reconnects once after confirmed loss", async () => {
+  const events = new EventTarget();
+  vi.stubGlobal("window", events);
+  const network = { onLine: true };
+  vi.stubGlobal("navigator", network);
+  const remote = useConnection();
+  remote.resume();
+  const old = Socket.sockets[0];
+  await old.open();
+  network.onLine = false;
+  events.dispatchEvent(new Event("offline"));
+  expect(remote.status.value).toBe("connected");
+  expect(old.readyState).toBe(Socket.OPEN);
+  old.close(1006);
+  expect(remote.status.value).toBe("offline");
+  expect(remote.permissions.value.input).toBe(false);
+  expect(remote.connectionBadgeLabel.value).toBe("无网络");
+  await expect(remote.send({ type: "key", key: "enter" })).rejects.toThrow("尚未连接");
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(Socket.sockets).toHaveLength(1);
+  network.onLine = true;
+  events.dispatchEvent(new Event("online"));
+  events.dispatchEvent(new Event("online"));
+  expect(Socket.sockets).toHaveLength(2);
+  await Socket.sockets[1].open();
+  expect(remote.status.value).toBe("connected");
+  remote.suspend();
+});
+it("attempts a LAN connection despite offline hints and rereads the network after suspension", () => {
+  const network = { onLine: false };
+  vi.stubGlobal("navigator", network);
+  const remote = useConnection();
+  remote.resume();
+  expect(Socket.sockets).toHaveLength(1);
+  remote.suspend();
+  network.onLine = true;
+  remote.resume();
+  expect(Socket.sockets).toHaveLength(2);
+  remote.suspend();
+});
+it("keeps USB independent of Wi-Fi hints and retries a broken tunnel without replaying commands", async () => {
+  vi.stubGlobal("location",{protocol:"https:",host:"127.0.0.1:49821",hostname:"127.0.0.1"});
+  vi.stubGlobal("navigator",{onLine:false});const events=new EventTarget();vi.stubGlobal("window",events);
+  const remote=useConnection();remote.resume();const first=Socket.sockets[0];await first.open();
+  events.dispatchEvent(new Event("offline"));expect(remote.status.value).toBe("connected");first.close(1006);
+  expect(remote.connectionBadgeLabel.value).not.toBe("无网络");await vi.advanceTimersByTimeAsync(700);
+  expect(Socket.sockets).toHaveLength(2);await Socket.sockets[1].open();expect(remote.status.value).toBe("connected");
+  expect(Socket.sockets[1].frames.filter(f=>f.kind==="qftStage")).toEqual([]);remote.suspend();
+});
+it("recovers from a throwing WebSocket constructor without losing credentials", async () => {
+  vi.stubGlobal("WebSocket", class { constructor() { throw new Error("blocked"); } });
+  const remote = useConnection();
+  expect(() => remote.resume()).not.toThrow();
+  expect(remote.status.value).toBe("offline");
+  expect(remote.connectionBadgeLabel.value).toBe("连接失败");
+  vi.stubGlobal("WebSocket", Socket);
+  await vi.advanceTimersByTimeAsync(700);
+  expect(Socket.sockets).toHaveLength(1);
+  expect(remote.token()).toBe("a".repeat(64));
+  remote.suspend();
+});
+
+it("does not inherit permissions when a new ready frame omits them", async () => {
+  const remote = useConnection();
+  remote.resume();
+  Socket.sockets[0].ready({ permissions: undefined });
+  expect(remote.permissions.value).toEqual({ input: false, text: false, files: false, power: false, microphone: false });
+  expect(loadQftKernel).not.toHaveBeenCalled();
+  await expect(remote.send({ type: "key", key: "enter" })).rejects.toThrow("尚未连接");
+  remote.suspend();
+});
+
+it("gates new media commands without disrupting an older PC connection", async () => {
+  const remote = useConnection(); remote.resume(); const ws = Socket.sockets[0]; await ws.open();
+  const before = ws.frames.length;
+  await expect(remote.send({ type: "media", action: "next" })).rejects.toThrow("请更新电脑端");
+  expect(ws.frames).toHaveLength(before);
+  expect(remote.status.value).toBe("connected");
+  remote.suspend();
+});
+it("accepts advertised media controls and forgets capabilities on disconnect", async () => {
+  const remote = useConnection(); remote.resume(); const ws = Socket.sockets[0];
+  await ws.open({ features: ["unknown", "media", "media", "custom-keys", "custom-keys"] });
+  expect(remote.features.value).toEqual(["media", "custom-keys"]);
+  const result = remote.send({ type: "media", action: "playpause" }).catch(() => {});
+  expect(ws.frames.some(f => f.kind === "qftStage" && f.command?.type === "media")).toBe(true);
+  remote.suspend(); await result;
+  expect(remote.features.value).toEqual([]);
+  remote.resume(); await Socket.sockets[1].open({ features: { media: true } });
+  expect(remote.features.value).toEqual([]);
+  remote.suspend();
+});
+it("uses an immutable native USB credential and preserves pairing when the endpoint expires", async () => {
+  vi.stubGlobal("location",{protocol:"https:",host:"127.0.0.1:49821",hostname:"127.0.0.1"});
+  const save=vi.fn(), key="b".repeat(64);
+  vi.stubGlobal("PlumeLinkAndroid",{getStoredToken:()=>"a".repeat(64),getUsbAccessKey:()=>key,setStoredToken:save});
+  const remote=useConnection();remote.resume();const ws=Socket.sockets[0];expect(ws.url).toBe("wss://127.0.0.1:49821/ws?usb="+key);
+  await ws.open();
+  expect(remote.usbExpired.value).toBe(false);
+  expect(remote.connectionLabel.value).toBe("已连接");
+  expect(isReadonly(remote.usbExpired)).toBe(true);
+  ws.close(4409);
+  expect(remote.usbExpired.value).toBe(true);
+  for (const [language, label] of [["zh-CN", "USB 连接已失效"], ["zh-TW", "USB 連線已失效"], ["en", "USB connection expired"]] as const) {
+    languagePreference.value = language;
+    expect(remote.connectionLabel.value).toBe(label);
+    expect(remote.connectionBadgeLabel.value).toBe(label);
+  }
+  remote.resume();await vi.advanceTimersByTimeAsync(15000);remote.resume();
+  expect(Socket.sockets).toHaveLength(1);expect(remote.token()).toBe("a".repeat(64));expect(save).not.toHaveBeenCalled();expect(remote.message.value).toContain("USB 有线连接");remote.suspend();
+});
+it("keeps the pairing credential after a USB HTTP expiry and supplies the key header", async () => {
+  vi.stubGlobal("location",{protocol:"https:",host:"127.0.0.1:49821",hostname:"127.0.0.1"});const key="b".repeat(64),save=vi.fn();
+  vi.stubGlobal("PlumeLinkAndroid",{getStoredToken:()=>"a".repeat(64),getUsbAccessKey:()=>key,setStoredToken:save});
+  const fetcher=vi.fn(async(_path:unknown,_init:RequestInit)=>({status:410}));vi.stubGlobal("fetch",fetcher);
+  const remote=useConnection();
+  expect(remote.usbExpired.value).toBe(false);
+  expect(remote.connectionLabel.value).not.toContain("失效");
+  await expect(remote.api("/api/status")).rejects.toThrow("USB 有线连接");
+  expect(remote.usbExpired.value).toBe(true);
+  expect(remote.connectionLabel.value).toBe("USB 连接已失效");
+  expect(remote.connectionBadgeLabel.value).toBe("USB 连接已失效");
+  const headers=fetcher.mock.calls[0][1].headers as Headers;expect(headers.get("X-PlumeLink-USB")).toBe(key);expect(headers.get("Authorization")).toBe("Bearer "+"a".repeat(64));
+  expect(remote.token()).toBe("a".repeat(64));expect(save).not.toHaveBeenCalled();await expect(remote.api("/api/status")).rejects.toThrow("USB 有线连接");expect(fetcher).toHaveBeenCalledTimes(1);remote.suspend();
 });

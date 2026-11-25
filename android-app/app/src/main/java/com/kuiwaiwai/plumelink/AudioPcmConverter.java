@@ -1,6 +1,6 @@
 package com.kuiwaiwai.plumelink;
 
-/** Streaming 48 -> 24 kHz conversion; filter history survives every read boundary. */
+/** Streaming PCM conversion; filter history survives every read boundary. */
 final class AudioPcmConverter {
     static final int OUTPUT_RATE = 24000;
     static final int FRAME_SAMPLES = 480;
@@ -14,18 +14,19 @@ final class AudioPcmConverter {
     private int position, phase;
 
     AudioPcmConverter(int rate) {
-        if (rate != OUTPUT_RATE && rate != OUTPUT_RATE * 2) throw new IllegalArgumentException("Unsupported capture rate");
+        if (rate != OUTPUT_RATE && rate != OUTPUT_RATE * 2 && rate != 44100) throw new IllegalArgumentException("Unsupported capture rate");
         this.rate = rate;
     }
 
     int convert(short[] input, int offset, int count, short[] output) {
         if (offset < 0 || count < 0 || offset > input.length - count) throw new IllegalArgumentException("Invalid input range");
-        int needed = rate == OUTPUT_RATE ? count : (count + phase) / 2;
+        int needed = rate == OUTPUT_RATE ? count : rate == 44100 ? (int)((count * 80L + phase) / 147) : (count + phase) / 2;
         if (output.length < needed) throw new IllegalArgumentException("Output buffer too small");
         if (rate == OUTPUT_RATE) {
             System.arraycopy(input, offset, output, 0, count);
             return count;
         }
+        if (rate == 44100) return convert44100(input, offset, count, output);
         int written = 0;
         for (int i = offset; i < offset + count; i++) {
             short v = input[i];
@@ -42,6 +43,51 @@ final class AudioPcmConverter {
             output[written++] = (short)Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, Math.round(sample)));
         }
         return written;
+    }
+
+    private int convert44100(short[] input, int offset, int count, short[] output) {
+        int written = 0;
+        for (int i = offset; i < offset + count; i++) {
+            short sample = input[i];
+            history[position] = sample;
+            history[position + TAPS] = sample;
+            if (++position == TAPS) position = 0;
+            phase += 80;
+            if (phase < 147) continue;
+            phase -= 147;
+            double[] weights = Rate44100.WEIGHTS[phase];
+            double value = 0;
+            int latest = position + TAPS - 1;
+            for (int tap = 0; tap < TAPS; tap++) value += weights[tap] * history[latest - tap];
+            output[written++] = (short)Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, Math.round(value)));
+        }
+        return written;
+    }
+
+    private static final class Rate44100 {
+        static final double[][] WEIGHTS = coefficients();
+
+        // 80/147 polyphase FIR: 47 input samples of fixed delay, unit DC gain per phase.
+        private static double[][] coefficients() {
+            double[][] phases = new double[80][TAPS];
+            int length = (TAPS - 1) * 80 + 1;
+            double cutoff = 10000.0 / (44100 * 80);
+            for (int phase = 0; phase < phases.length; phase++) {
+                double sum = 0;
+                for (int tap = 0; tap < TAPS; tap++) {
+                    int index = tap * 80 - phase;
+                    if (index < 0 || index >= length) continue;
+                    int distance = index - (length - 1) / 2;
+                    double sinc = distance == 0 ? 2 * cutoff : Math.sin(2 * Math.PI * cutoff * distance) / (Math.PI * distance);
+                    double window = 0.42 - 0.5 * Math.cos(2 * Math.PI * index / (length - 1))
+                        + 0.08 * Math.cos(4 * Math.PI * index / (length - 1));
+                    phases[phase][tap] = sinc * window;
+                    sum += phases[phase][tap];
+                }
+                for (int tap = 0; tap < TAPS; tap++) phases[phase][tap] /= sum;
+            }
+            return phases;
+        }
     }
 
     private static double[] lowPassHalf() {

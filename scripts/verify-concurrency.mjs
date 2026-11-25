@@ -96,184 +96,126 @@ export function installMixedAudio({ token }) {
   };
 }
 
-export async function verifyConcurrency({
-  page,
-  context,
-  commands,
-  frames,
-  audioReports,
-  token,
-}) {
+// Models the native uploader for server scheduling checks; Android tests exercise its implementation.
+export function installMixedUpload({ token }) {
+  window.PlumeLinkAndroid.chooseUploadFiles = () => {
+    window.__upload = { done: false, error: null, bytes: 0 };
+    const name = "concurrent-upload.bin", size = 4 * 1024 ** 2;
+    const progress = (done = false) => window.dispatchEvent(new CustomEvent("plumelink-native-transfer", {
+      detail: { done, succeeded: done, direction: "send", fileName: name, fileCount: done ? 1 : 0,
+        progress: Math.floor(window.__upload.bytes * 100 / size), message: done ? "Upload complete" : "Uploading" },
+    }));
+    progress();
+    void (async () => {
+      const id = crypto.randomUUID().replaceAll("-", ""), path = "/api/uploads/" + id;
+      const request = async (path, init) => {
+        const response = await fetch(path, { ...init, headers: { Authorization: `Bearer ${token}`, ...init.headers } });
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error || "upload rejected");
+        return data;
+      };
+      try {
+        await request("/api/uploads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, name, size }) });
+        while (window.__upload.bytes < size) {
+          const bytes = new Uint8Array(64 * 1024).fill(0x33);
+          const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(v => v.toString(16).padStart(2, "0")).join("");
+          const state = await request(path, { method: "PUT", headers: { "Content-Type": "application/octet-stream", "X-Upload-Offset": String(window.__upload.bytes), "X-Chunk-SHA256": digest }, body: bytes });
+          if (state.offset !== window.__upload.bytes + bytes.length) throw Error("invalid upload offset");
+          window.__upload.bytes = state.offset; progress();
+          await new Promise(resolve => setTimeout(resolve, 64));
+        }
+        const state = await request(path, { method: "POST" });
+        if (!state.complete || state.offset !== size) throw Error("upload not committed");
+        window.__upload.done = true; progress(true);
+      } catch (error) {
+        window.__upload.error = String(error);
+        window.dispatchEvent(new CustomEvent("plumelink-native-transfer", { detail: { done: true, succeeded: false, message: String(error) } }));
+      }
+    })();
+  };
+}
+
+export async function verifyConcurrency({ page, commands, frames, audioReports, token, fire, control, pointer }) {
   const out = resolve("artifacts/concurrency");
   await mkdir(out, { recursive: true });
-  const nav = (name) =>
-    page
-      .getByRole("navigation", { name: "主导航" })
-      .getByRole("button", { name, exact: true })
-      .click();
-  const mic = page.getByRole("button", {
-    name: "按住说话，上滑锁定",
-    exact: true,
-  });
-  const r = await mic.boundingBox(),
-    x = r.x + r.width / 2,
-    y = r.y + r.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
+  await pointer("mic", "down", 100, 300);
   await page.waitForTimeout(300);
-  await page.mouse.move(x, y - 85, { steps: 8 });
-  await page.waitForTimeout(2200);
-  await page.mouse.up();
-  await page.locator(".mic-compact").waitFor();
-  assert.ok(
-    await page
-      .locator(".mic-compact")
-      .evaluate(
-        (e) =>
-          e.getBoundingClientRect().bottom <=
-          document.querySelector(".touchpad").getBoundingClientRect().top,
-      ),
-  );
-  await nav("文件");
-  await page.getByText("concurrent-download.bin", { exact: true }).waitFor();
+  await pointer("mic", "move", 100, 100);
+  await page.waitForTimeout(1200);
+  await pointer("mic", "up", 100, 100);
+  await page.waitForFunction(() => window.__nativeUi.microphone.locked);
+  await fire("nav-files");
+  await control("save-1");
   const audioBefore = await page.evaluate(() => window.__audio.acks);
   const requests = [];
-  page.on("request", (request) => {
-    if (request.method() === "PUT" && request.url().includes("/api/uploads/"))
-      requests.push(request.postDataBuffer().length);
+  page.on("request", request => {
+    if (request.method() === "PUT" && request.url().includes("/api/uploads/")) requests.push(request.postDataBuffer().length);
   });
-  await page.locator("input[type=file]").setInputFiles({
-    name: "concurrent-upload.bin",
-    mimeType: "application/octet-stream",
-    buffer: Buffer.alloc(4 * 1024 ** 2, 0x33),
-  });
-  await page.evaluate((token) => {
+  await fire("upload");
+  await page.evaluate(token => {
     window.__download = { bytes: 0, done: false, error: null };
     void (async () => {
       try {
-        const headers = { Authorization: `Bearer ${token}` },
-          list = await (await fetch("/api/files", { headers })).json();
-        const response = await fetch("/api/files/" + list.files[0].id, {
-          headers,
-        });
+        const headers = { Authorization: `Bearer ${token}` };
+        const list = await (await fetch("/api/files", { headers })).json();
+        const response = await fetch("/api/files/" + list.files[0].id, { headers });
         if (!response.ok) throw Error("download rejected");
         const reader = response.body.getReader();
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (value.some((v) => v !== 0x5a)) throw Error("download corrupted");
+          if (value.some(v => v !== 0x5a)) throw Error("download corrupted");
           window.__download.bytes += value.length;
         }
         window.__download.done = true;
-      } catch (error) {
-        window.__download.error = String(error);
-      }
+      } catch (error) { window.__download.error = String(error); }
     })();
   }, token);
-  await nav("遥控");
-  const cdp = await context.newCDPSession(page),
-    pad = await page.locator(".touchpad").boundingBox();
+  await fire("nav-remote");
   const commandStart = commands.length;
   const began = Date.now();
   let n = 0;
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchStart",
-    touchPoints: [{ id: 1, x: pad.x + 90, y: pad.y + 90 }],
-  });
+  await pointer("pad", "down", 90, 90);
   const durationMs = Number(process.env.QFT_MIXED_DURATION_MS ?? 10000);
-  assert.ok(
-    Number.isFinite(durationMs) && durationMs >= 10000 && durationMs <= 300000,
-  );
+  assert.ok(Number.isFinite(durationMs) && durationMs >= 10000 && durationMs <= 300000);
   while (Date.now() - began < durationMs) {
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [{ id: 1, x: pad.x + 90 + (n++ % 60), y: pad.y + 90 }],
-    });
+    await pointer("pad", "move", 90 + (n++ % 60), 90);
     await page.waitForTimeout(30);
   }
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchEnd",
-    touchPoints: [],
-  });
-  assert.ok(
-    commands.slice(commandStart).filter((v) => v.type === "motion").length > 80,
-  );
-  await page.waitForFunction(
-    () => window.__download.done || window.__download.error,
-    {},
-    { timeout: 30000 },
-  );
+  await pointer("pad", "up", 90, 90);
+  assert.ok(commands.slice(commandStart).filter(v => v.type === "motion").length > 80);
+  await page.waitForFunction(() => window.__download.done || window.__download.error, {}, { timeout: 30000 });
   const download = await page.evaluate(() => window.__download);
   assert.equal(download.error, null);
   assert.equal(download.bytes, 4 * 1024 ** 2);
-  await nav("文件");
-  await page
-    .getByText("concurrent-upload.bin 已保存到电脑", { exact: true })
-    .waitFor({ timeout: 30000 });
-  assert.ok(
-    requests.length >= 64 && requests.every((n) => n <= 64 * 1024),
-    "live capture bounds upload bursts",
-  );
-  await nav("遥控");
+  await page.waitForFunction(() => window.__upload.done || window.__upload.error, {}, { timeout: 30000 });
+  const upload = await page.evaluate(() => window.__upload);
+  assert.equal(upload.error, null);
+  assert.equal(upload.bytes, 4 * 1024 ** 2);
+  assert.ok(requests.length >= 64 && requests.every(n => n <= 64 * 1024));
   const prior = await page.evaluate(() => window.__audio.acks);
   await page.evaluate(() => window.__controlSocket.close());
-  await page.getByRole("button", { name: /已连接/ }).waitFor();
+  await page.waitForFunction(() => window.__nativeUi.sessionStatus === "connected");
   await page.waitForTimeout(1000);
-  assert.ok(await page.locator(".mic-compact").isVisible());
+  assert.ok(await page.evaluate(() => window.__nativeUi.microphone.locked));
   const metrics = await page.evaluate(() => window.__audio);
   assert.equal(metrics.connections, 1);
-  assert.ok(metrics.acks > prior);
-  assert.ok(metrics.acks - audioBefore > 300);
+  assert.ok(metrics.acks > prior && metrics.acks - audioBefore > 300);
   assert.deepEqual(metrics.errors, []);
   const closures = await page.evaluate(() => window.__socketClosures);
-  assert.equal(
-    frames.sockets,
-    3,
-    "only audio, initial control and explicitly reconnected control: " +
-      JSON.stringify(closures),
-  );
-  await page.screenshot({ path: resolve(out, "compact-microphone.png") });
-  await page.locator(".mic-compact-stop").click();
+  assert.equal(frames.sockets, 3, JSON.stringify(closures));
+  await fire("mic-stop");
   await page.waitForTimeout(300);
-  assert.ok(audioReports.some((v) => v.samples > 48000));
-  await page.getByRole("button", { name: "右键", exact: true }).click();
+  assert.ok(audioReports.some(v => v.samples > 48000));
+  await fire("right");
   await page.waitForTimeout(100);
-  assert.ok(
-    commands
-      .slice(commandStart)
-      .some((v) => v.type === "click" && v.button === "right"),
-  );
-  const rtts = metrics.rtts.sort((a, b) => a - b);
-  const p95 = rtts[Math.floor(rtts.length * 0.95)];
+  assert.ok(commands.slice(commandStart).some(v => v.type === "click" && v.button === "right"));
+  const rtts = metrics.rtts.sort((a, b) => a - b), p95 = rtts[Math.floor(rtts.length * .95)];
   assert.ok(p95 < 200, `audio ack p95 ${p95} ms`);
-  await writeFile(
-    resolve(out, "results.json"),
-    JSON.stringify(
-      {
-        passed: true,
-        scope:
-          "Production HTTPS/WSS, WASM input, streamed files, synthetic capture and audio renderer",
-        uploadBytes: 4 * 1024 ** 2,
-        download,
-        uploadRequests: requests.length,
-        audioFrames: metrics.acks,
-        audioAckP95Ms: p95,
-        audioAckMaxMs: rtts.at(-1),
-        audioReports,
-        frames,
-        closures,
-        inputDurationMs: durationMs,
-        checks: [
-          "simultaneous audio/input/upload/download",
-          "navigation preserves locked microphone",
-          "compact status stays outside touchpad",
-          "control reconnect preserves audio",
-          "audio stop preserves input",
-        ],
-      },
-      null,
-      2,
-    ),
-  );
+  await writeFile(resolve(out, "results.json"), JSON.stringify({ passed: true,
+    scope: "Production native-state engine, HTTPS/WSS and WASM input; synthetic native upload, capture and renderer",
+    upload, download, uploadRequests: requests.length, audioFrames: metrics.acks, audioAckP95Ms: p95,
+    audioAckMaxMs: rtts.at(-1), audioReports, frames, closures, inputDurationMs: durationMs,
+    checks: ["simultaneous audio/input/upload/download", "navigation preserves locked microphone", "control reconnect preserves audio", "audio stop preserves input"] }, null, 2));
   console.log("Concurrent transport checks passed; audio ACK p95:", p95);
 }

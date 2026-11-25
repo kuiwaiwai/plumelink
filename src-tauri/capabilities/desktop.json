@@ -4,5 +4,5 @@
   "description": "Only the bundled main window can read state and manage the remote service.",
   "windows": ["main"],
   "local": true,
-  "permissions": ["allow-desktop-state", "allow-set-ui-language", "allow-open-logs-dir", "allow-open-project-page", "allow-desktop-action", "allow-set-service-port", "allow-transfer-action", "allow-device-action", "allow-admin-action", "allow-diagnostic-action", "allow-microphone-action", "core:window:allow-is-maximized", "core:window:allow-hide", "core:window:allow-toggle-maximize", "core:window:allow-start-dragging", "core:window:allow-close"]
+  "permissions": ["allow-desktop-state", "allow-set-ui-language", "allow-open-logs-dir", "allow-open-project-page", "allow-desktop-action", "allow-set-service-port", "allow-transfer-action", "allow-receive-action", "allow-application-action", "allow-device-action", "allow-admin-action", "allow-diagnostic-action", "allow-microphone-action", "allow-usb-action", "core:window:allow-is-maximized", "core:window:allow-hide", "core:window:allow-toggle-maximize", "core:window:allow-start-dragging", "core:window:allow-close"]
 }

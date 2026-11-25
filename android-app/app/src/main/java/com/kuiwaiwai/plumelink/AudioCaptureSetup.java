@@ -23,27 +23,33 @@ final class AudioCaptureSetup {
     }
 
     static <T extends Device> Opened<T> open(Factory<T> factory, BooleanSupplier cancelled) {
+        return open(factory, cancelled, false);
+    }
+    static <T extends Device> Opened<T> open(Factory<T> factory, BooleanSupplier cancelled, boolean speechProcessing) {
         IllegalStateException failure = new IllegalStateException("手机麦克风初始化失败，请检查录音权限或是否被其他应用占用");
-        for (Source source : Source.values()) {
-            for (int rate : new int[]{48000, 24000}) {
-                checkCancelled(cancelled);
-                T device = null;
-                boolean transferred = false;
-                try {
-                    device = factory.create(rate, source);
+        Source[] sources = speechProcessing ? new Source[]{Source.MICROPHONE, Source.VOICE_RECOGNITION} : Source.values();
+        for (int[] rates : new int[][]{{48000, 24000}, {44100}}) {
+            for (Source source : sources) {
+                for (int rate : rates) {
                     checkCancelled(cancelled);
-                    if (!device.initialized()) throw new IllegalStateException("录音格式不可用");
-                    device.start();
-                    checkCancelled(cancelled);
-                    if (!device.recording()) throw new IllegalStateException("无法开始收音");
-                    transferred = true;
-                    return new Opened<>(device, rate, source);
-                } catch (CancellationException e) {
-                    throw e;
-                } catch (IllegalArgumentException | IllegalStateException e) {
-                    failure.addSuppressed(e);
-                } finally {
-                    if (device != null && !transferred) device.close();
+                    T device = null;
+                    boolean transferred = false;
+                    try {
+                        device = factory.create(rate, source);
+                        checkCancelled(cancelled);
+                        if (!device.initialized()) throw new IllegalStateException("录音格式不可用");
+                        device.start();
+                        checkCancelled(cancelled);
+                        if (!device.recording()) throw new IllegalStateException("无法开始收音");
+                        transferred = true;
+                        return new Opened<>(device, rate, source);
+                    } catch (CancellationException e) {
+                        throw e;
+                    } catch (IllegalArgumentException | IllegalStateException e) {
+                        failure.addSuppressed(e);
+                    } finally {
+                        if (device != null && !transferred) device.close();
+                    }
                 }
             }
         }

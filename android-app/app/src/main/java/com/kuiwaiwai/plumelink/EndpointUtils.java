@@ -16,6 +16,10 @@ import java.util.Locale;
 final class EndpointUtils {
     static final int DEFAULT_SERVICE_PORT = 17840;
     private EndpointUtils() {}
+    static boolean isUsbEndpoint(String value) {
+        try { return "127.0.0.1".equals(new java.net.URI(value).getHost()); }
+        catch (Exception ignored) { return false; }
+    }
 
     static String normalize(String input) {
         String value = input.trim().replace(" ", "");

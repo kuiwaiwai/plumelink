@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { t } from "../../../shared/i18n";
 import { errorText, formatHost } from "../../../shared/format";
-import type { DesktopState } from "../../../shared/protocol";
+import type { DesktopState, ReceiveAction } from "../../../shared/protocol";
 import { DEFAULT_SERVICE_PORT, desktop } from "../bridge";
 
 export function useDesktop() {
@@ -45,12 +45,13 @@ export function useDesktop() {
   const copyMessage = ref("");
   const draggingFiles = ref(false);
   let disposed = false;
+  let stateVersion = 0;
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let unsubscribe = () => {};
   let unlistenDrop = () => {};
 
   const url = computed(() =>
-    state.value.selected
+    state.value.selected && state.value.lanRunning !== false
       ? `https://${formatHost(state.value.selected)}:${state.value.port}`
       : "",
   );
@@ -63,6 +64,7 @@ export function useDesktop() {
 
   function update(value: DesktopState) {
     if (disposed) return;
+    stateVersion++;
     initializing.value = false;
     connectionError.value = "";
     state.value = value;
@@ -93,6 +95,12 @@ export function useDesktop() {
       }
     },
   );
+
+  async function receiveAction(action: ReceiveAction, taskId?: string) {
+    const version = stateVersion;
+    const value = await desktop.receive(action, taskId);
+    if (stateVersion === version) update(value);
+  }
 
   async function action(name: string) {
     if (busy.value) return;
@@ -244,6 +252,7 @@ export function useDesktop() {
     saveHaloSize,
     setPort,
     transfer,
+    receiveAction,
     deviceAction,
     adminAction,
   };

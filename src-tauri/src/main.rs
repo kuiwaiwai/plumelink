@@ -185,8 +185,14 @@ async fn microphone_action(
     service: tauri::State<'_, Arc<Service>>,
     action: String,
     id: Option<String>,
+    recording: Option<String>,
 ) -> Result<serde_json::Value, String> {
     local(&window)?;
+    if action == "levels" {
+        return serde_json::to_value(plumelink::microphone::endpoint_volumes(
+            id.unwrap_or_default(), recording.unwrap_or_default(),
+        ).await).map_err(|e| e.to_string());
+    }
     // Stop is immediate even if the driver was unplugged or enumeration fails.
     if action == "installCable" {
         if service.controller.audio.status().active {
@@ -200,11 +206,14 @@ async fn microphone_action(
     if action == "gain" {
         let db: u8 = id.as_ref().ok_or("缺少增益数值")?.parse().map_err(|_| "增益数值无效")?;
         if db > 36 { return Err("增益数值无效".into()); }
-        service.store.lock().unwrap().update(|p| p.microphone_gain_db = db)?;
+        let mut store = service.store.lock().unwrap();
+        store.update(|p| p.microphone_gain_db = db)?;
         service.controller.audio.set_gain_db(db);
+        return Ok(serde_json::json!({"gainDb": db}));
     }
     if action == "stop" {
         service.controller.audio.stop();
+        return Ok(serde_json::json!({"stopped": true}));
     }
     let outputs = tokio::task::spawn_blocking(plumelink::microphone::endpoints)
         .await
@@ -214,8 +223,7 @@ async fn microphone_action(
             .await
             .map_err(|e| e.to_string())??;
     match action.as_str() {
-        "list" | "installCable" | "gain" => {}
-        "stop" => service.controller.audio.stop(),
+        "list" | "installCable" => {}
         "select" => {
             let id = id.unwrap_or_default();
             let name = if id.is_empty() {
@@ -455,6 +463,41 @@ fn quit(app: &tauri::AppHandle) {
         app.exit(0);
     });
 }
+#[tauri::command]
+async fn application_action(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Arc<Service>>,
+    action: String,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<Vec<plumelink::launcher::Entry>, String> {
+    local(&window)?;
+    let owner = if matches!(action.as_str(), "add" | "add-folder") {
+        Some(window.hwnd().map_err(|_| "无法打开系统选择器")?.0 as usize)
+    } else { None };
+    let store = service.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match action.as_str() {
+            "list" => {}
+            "add" => plumelink::launcher::add(&store, plumelink::file_transfer::choose(plumelink::file_transfer::PickKind::Applications, owner)?)?,
+            "add-folder" => if let Some(folder) = plumelink::file_transfer::choose(plumelink::file_transfer::PickKind::Folder, owner)?.into_iter().next() {
+                plumelink::launcher::add_folder(&store, folder)?;
+            },
+            "rename" => plumelink::launcher::rename(&store, &id.ok_or("缺少快捷入口标识")?, &name.ok_or("请输入名称")?)?,
+            "remove" => {
+                let id = id.ok_or("缺少快捷入口标识")?;
+                store
+                    .lock()
+                    .unwrap()
+                    .update(|p| p.applications.retain(|entry| entry.id != id))?;
+            }
+            _ => return Err("快捷入口操作无效".into()),
+        }
+        Ok(store.lock().unwrap().get().applications)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum TransferAction {
@@ -463,6 +506,35 @@ enum TransferAction {
     Pickfile,
     Remove,
     Addpaths,
+}
+
+#[tauri::command]
+async fn receive_action(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    service: tauri::State<'_, Arc<Service>>,
+    action: String,
+    task_id: Option<String>,
+) -> Result<DesktopState, String> {
+    local(&window)?;
+    match action.as_str() {
+        "cancel" => service.files.received.cancel(task_id.as_deref().ok_or("缺少接收任务标识")?)?,
+        "clear" => service.files.received.clear_finished(),
+        "open" => {
+            let permit = service.files.received.try_open_slot()?;
+            let create = task_id.is_none();
+            let path = match task_id {
+                Some(id) => service.files.received.directory(&id)?,
+                None => plumelink::file_transfer::receive_dir(&service.store),
+            };
+            tauri::async_runtime::spawn_blocking(move || {
+                let _permit = permit;
+                plumelink::file_transfer::open_receive_directory(&path, create)
+            }).await.map_err(|_| "无法打开接收目录，请检查目录是否可用")??;
+        }
+        _ => return Err("接收操作无效".into()),
+    }
+    Ok(enrich(&app, service.snapshot().await))
 }
 
 #[tauri::command]
@@ -476,21 +548,22 @@ async fn transfer_action(
     ids: Option<Vec<u64>>,
 ) -> Result<DesktopState, String> {
     local(&window)?;
+    let owner = if matches!(&action, TransferAction::Pickreceive | TransferAction::Pickfile) {
+        Some(window.hwnd().map_err(|_| "无法打开系统选择器")?.0 as usize)
+    } else { None };
     match action {
         TransferAction::Pickreceive => {
-            let selected = tauri::async_runtime::spawn_blocking(
-                plumelink::file_transfer::choose_folder,
-            )
+            let selected = tauri::async_runtime::spawn_blocking(move ||
+                plumelink::file_transfer::choose(plumelink::file_transfer::PickKind::Folder, owner))
             .await
             .map_err(|e| e.to_string())??;
-            if let Some(path) = selected {
+            if let Some(path) = selected.into_iter().next() {
                 plumelink::file_transfer::set_receive_dir(&service.store, path)?;
             }
         }
         TransferAction::Pickfile => {
-            let selected = tauri::async_runtime::spawn_blocking(
-                plumelink::file_transfer::choose_files,
-            )
+            let selected = tauri::async_runtime::spawn_blocking(move ||
+                plumelink::file_transfer::choose(plumelink::file_transfer::PickKind::Files, owner))
             .await
             .map_err(|e| e.to_string())??;
             service.files.add_many(selected)?;
@@ -573,6 +646,23 @@ async fn admin_action(
     Ok(enrich(&app, state))
 }
 #[tauri::command]
+async fn usb_action(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Arc<Service>>,
+    action: String,
+    id: Option<String>,
+) -> Result<plumelink::usb::Status, String> {
+    local(&window)?;
+    match action.as_str() {
+        "status" => {},
+        "connect" => service.usb_connect(id.as_deref().ok_or("请选择手机")?).await?,
+        "disconnect" => service.usb_disconnect(id.as_deref()).await?,
+        "cancel" => service.usb.cancel_connection(),
+        _ => return Err("未知 USB 操作".into()),
+    }
+    Ok(service.usb_status().await)
+}
+#[tauri::command]
 fn open_project_page(window: tauri::WebviewWindow) -> Result<(), String> {
     use windows::{
         core::w,
@@ -612,6 +702,22 @@ fn open_logs_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<
 }
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if arguments.get(1).is_some_and(|arg| arg == "--verify-usb-connection") {
+        let port=match arguments.get(2) {Some(value)=>match value.parse::<u16>() {Ok(port) if port>0=>port,_=>std::process::exit(2)},None=>5037};
+        let runtime = tokio::runtime::Runtime::new().expect("verification runtime");
+        let result=runtime.block_on(plumelink::usb::diagnose_bundled_usb(port));
+        println!("{result}");
+        if result["ok"] != true {std::process::exit(1);}
+        return;
+    }
+    if arguments.get(1).is_some_and(|arg| arg == "--verify-usb-component") {
+        let runtime = tokio::runtime::Runtime::new().expect("verification runtime");
+        match runtime.block_on(plumelink::usb::verify_bundled_component()) {
+            Ok(version) => println!("{}", serde_json::json!({"ok":true,"component":"bundled","version":version})),
+            Err(error) => { println!("{}", serde_json::json!({"ok":false,"error":error})); std::process::exit(1); }
+        }
+        return;
+    }
     if arguments.get(1).is_some_and(|arg| arg == "--update-startup-registration") {
         let result = arguments.get(2).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
             .and_then(|name| update_startup_registration(std::path::Path::new(name)));
@@ -658,10 +764,13 @@ fn main() {
             desktop_action,
             set_service_port,
             transfer_action,
+            receive_action,
+            application_action,
             device_action,
             admin_action,
             diagnostic_action,
             microphone_action,
+            usb_action,
             open_logs_dir,
             open_project_page
         ])
@@ -687,6 +796,10 @@ fn main() {
             )
             .map_err(std::io::Error::other)?;
             let service = Service::new(store).map_err(std::io::Error::other)?;
+            match plumelink::power_events::PowerMonitor::register(&service.controller) {
+                Ok(monitor) => { app.manage(monitor); }
+                Err(error) => plumelink::logging::warn("power", &error),
+            }
             app.manage(service.clone());
             let show_item =
                 MenuItem::with_id(app, "show", "打开羽连 PlumeLink", true, None::<&str>)?;
@@ -746,6 +859,7 @@ fn main() {
                     if service.exiting.load(Ordering::SeqCst) {
                         break;
                     }
+                    if ticks.is_multiple_of(2) && service.usb.needs_refresh() { service.usb_status().await; }
                     let preference = service.store.lock().unwrap().get().autostart;
                     if let Some(enabled) = preference {
                         if last != Some(enabled) {
@@ -757,7 +871,7 @@ fn main() {
                     }
                     if ticks.is_multiple_of(5)
                         && service.desired_running.load(Ordering::SeqCst)
-                        && !service.snapshot().await.running
+                        && !service.snapshot().await.lan_running
                     {
                         service.retry_start().await;
                     }

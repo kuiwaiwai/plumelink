@@ -1,6 +1,6 @@
 {
   "name": "plumelink",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "羽连 PlumeLink — 手机遥控、文件互传与麦克风连接工具",
   "author": "PlumeLink contributors",
   "license": "MIT",
@@ -39,7 +39,11 @@
     "verify:regression": "node scripts/verify-regression.mjs",
     "verify:qft": "npm run build:frontend && node scripts/verify-qft.mjs",
     "verify:concurrency": "npm run build:frontend && node scripts/verify-qft.mjs --mixed",
-    "verify:mobile": "npm run build:frontend && node scripts/verify-mobile-ui.mjs"
+    "verify:mobile": "npm run build:frontend && node scripts/verify-qft.mjs --native-ui",
+    "verify:launcher": "npm run build:frontend && node scripts/verify-qft.mjs --launch-errors",
+    "verify:window-picker": "npm run build:frontend && node scripts/verify-qft.mjs --window-live",
+    "verify:microphone": "npm run build:frontend && node scripts/verify-qft.mjs --microphone-status",
+    "verify:shortcut-plans": "npm run build:frontend && node scripts/verify-qft.mjs --shortcut-plans"
   },
   "dependencies": {
     "@lucide/vue": "1.45.0",

@@ -1,0 +1,4 @@
+<resources>
+    <string name="ui_audio_usb_interrupted">电脑音频连接已中断，请检查数据线和电脑端的 USB 有线连接设置，再重新开启麦克风</string>
+    <string name="ui_audio_connection_interrupted">电脑音频连接无响应，请检查连接后重新开启麦克风</string>
+</resources>

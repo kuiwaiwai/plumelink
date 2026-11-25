@@ -4,7 +4,9 @@
 
 [简体中文](README.md)
 
-Use an Android phone as a touchpad, directional remote or wireless microphone for a Windows PC. You can also send files in either direction. The phone connects directly to the PC on your local network. No account is required.
+Use an Android phone as a touchpad, directional remote or microphone for a Windows PC. You can also send files in either direction. Connect directly over your local network or a USB data cable. No account is required.
+
+PlumeLink provides a Windows desktop app and a native Android client. There is no standalone web client.
 
 <img src="docs/assets/ui/android-touchpad-landscape.png" width="850" alt="Android landscape remote with the touchpad on the left and keyboard, microphone and media controls on the right">
 
@@ -12,7 +14,7 @@ Use an Android phone as a touchpad, directional remote or wireless microphone fo
 
 ## Installation
 
-Install the APK on your phone and run the Windows installer with VB-CABLE on your PC. Public builds will be available on [GitHub Releases](https://github.com/kuiwaiwai/plumelink/releases).
+Install the APK on your phone and run the Windows installer with VB-CABLE on your PC. Download public builds from [GitHub Releases](https://github.com/kuiwaiwai/plumelink/releases).
 
 | File | When to use it |
 | --- | --- |
@@ -25,7 +27,10 @@ The Windows installer downloads WebView2 if needed. The touchpad, directional re
 
 - **Touchpad.** Move the pointer, tap to click, hold to drag, scroll with two fingers or pinch to zoom. In the two-pane landscape layout, place the touchpad on either side.
 - **Directional remote.** Use the D-pad, confirm and cancel buttons to navigate menus or a media player. Choose the remote mode and dial size in the phone’s touch and feedback settings. In landscape, use the opposing arrows to swap sides and the diagonal arrows to toggle focus mode.
-- **Keyboard and shortcuts.** Send text to the focused field on the PC, pick a window, or control playback and volume. Choose an action and an icon for each of the three shortcut slots.
+- **Keyboard and shortcuts.** Send text to the focused field on the PC, pick a window, or control playback and volume. Choose an action and icon for each of the three shortcut slots, configure letters, digits, F1–F12 and combinations with Ctrl, Alt, Shift or Win, or use an editing, browsing, presentation or system media preset. System media controls work with players that support Windows media keys.
+
+Preview and switch the three shortcut slots under More → Shortcut plans. Save your current actions and icons in up to eight custom plans for each PC.
+- **Quick launch.** Add .exe apps or folders under Preferences → Remote control settings → PC shortcuts and choose their display names. Assign Quick launch to a phone shortcut slot to open them. Folders open in File Explorer on the PC.
 
 The interface supports English, Simplified Chinese and Traditional Chinese, with light, dark and system appearance settings.
 
@@ -43,9 +48,21 @@ The phone remembers paired PCs. Manage each phone’s permissions or revoke acce
 
 <img src="docs/assets/ui/desktop-en.png" width="340" alt="English Windows overview in a narrow window, showing device status and the pairing panel with its credentials masked">
 
+### USB connection
+
+The Windows installer includes the USB connection component; Android Platform-Tools does not need to be installed separately. Enable USB debugging in the phone’s developer options, connect a data cable and approve this PC on the phone.
+
+In PlumeLink on Windows, open Preferences → USB connection, check for devices and connect the selected phone. On first use, compare the certificate and address with the PC’s USB panel and enter the pairing code shown there. USB tethering is not required.
+
+Remote control, text, window selection, files and microphone audio use the same encrypted connection and device permissions. The PC keeps separate USB and wireless addresses while sharing its paired phone’s shortcut configuration.
+
+Reconnecting the cable restores the USB channel for phones selected during the current PC session. Disconnecting a phone in PlumeLink cancels its automatic recovery. After exiting or restarting PlumeLink on the PC, select the phone again; its pairing is retained.
+
+Each phone has its own USB endpoint, shown below its name. Disconnecting one phone stops its wired sessions while other phones and wireless connections remain available.
+
 ## Files and microphone
 
-To send a file to the phone, drop it in the file-sharing area on Windows, then open **Files** on the phone and save it. To send a file to the PC, choose it on the phone. Each device has its own receive folder. The limit is 2 GB per file.
+To send a file to the phone, drop it in the file-sharing area on Windows, then open **Files** on the phone and save it. To send files to the PC, choose them in PlumeLink or use **Share → PlumeLink** in a gallery or file manager, then review the pending list and target PC before sending. Each device has its own receive folder. The limit is 2 GB per file.
 
 To listen to the phone through the PC, select a playback device in the desktop microphone settings. To use the phone as an input in a website or recording app, route it through a virtual audio cable. With VB-CABLE, send audio to `CABLE Input` in PlumeLink and select `CABLE Output` as the microphone in the receiving app. [Microphone and file transfer guide](docs/REMOTE-AUDIO-TRANSFERS.md)
 

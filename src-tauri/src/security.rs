@@ -136,6 +136,8 @@ impl Pairing {
             let now = unix_time();
             if let Some(device) = p.devices.iter_mut().find(|device| device.id == device_id) {
                 device.name = name.clone();
+                device.reported_name = name.clone();
+                device.name_customized = false;
                 device.token_digest = digest;
                 device.last_seen = now;
             } else {
@@ -149,6 +151,8 @@ impl Pairing {
                 p.devices.push(crate::preferences::PairedDevice {
                     id: device_id.clone(),
                     name: name.clone(),
+                    reported_name: name.clone(),
+                    name_customized: false,
                     token_digest: digest,
                     permissions: crate::preferences::DevicePermissions::default(),
                     paired_at: now,
@@ -186,6 +190,27 @@ impl Pairing {
                 name: device.name,
                 permissions: device.permissions,
             })
+    }
+    pub fn report_name(&self, device_id: &str, name: &str, model: &str) -> Result<String, String> {
+        let valid = |value: &str| value.chars().count() <= 40 && !value.chars().any(char::is_control);
+        let name = name.trim();
+        let model = model.trim();
+        if name.is_empty() || !valid(name) || !valid(model) { return Err("设备名称无效".into()); }
+        let mut store = self.store.lock().unwrap();
+        let current = store.get().devices.into_iter().find(|device| device.id == device_id).ok_or("设备不存在")?;
+        if current.reported_name == name { return Ok(current.name); }
+        let mut display = current.name.clone();
+        store.update(|preferences| {
+            if let Some(device) = preferences.devices.iter_mut().find(|device| device.id == device_id) {
+                if device.reported_name.is_empty() && device.name != name && device.name != model {
+                    device.name_customized = true;
+                }
+                if !device.name_customized { device.name = name.into(); }
+                device.reported_name = name.into();
+                display.clone_from(&device.name);
+            }
+        })?;
+        Ok(display)
     }
     pub fn mark_seen(&self, device_id: &str) {
         let now = unix_time();
@@ -243,6 +268,30 @@ impl Limiter {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reported_names_upgrade_model_codes_and_preserve_custom_names() {
+        let store = crate::preferences::Store::memory();
+        let mut pairing = Pairing::with_store(store.clone()).unwrap();
+        let paired = pairing.pair_device(&pairing.code.clone(), None, "2206122SC").unwrap().unwrap();
+        store.lock().unwrap().update(|p| p.devices[0].reported_name.clear()).unwrap();
+        assert_eq!(pairing.report_name(&paired.device_id, "Xiaomi 12S Pro", "2206122SC").unwrap(), "Xiaomi 12S Pro");
+        assert_eq!(pairing.report_name(&paired.device_id, "我的手机", "2206122SC").unwrap(), "我的手机");
+        store.lock().unwrap().update(|p| { p.devices[0].name = "2206122SC".into(); p.devices[0].name_customized = true; }).unwrap();
+        assert_eq!(pairing.report_name(&paired.device_id, "新的手机名称", "2206122SC").unwrap(), "2206122SC");
+        assert!(pairing.valid(&paired.token));
+        assert!(pairing.report_name(&paired.device_id, "bad\nname", "").is_err());
+        assert!(pairing.report_name(&paired.device_id, &"📱".repeat(41), "").is_err());
+        assert!(pairing.report_name("unknown", "phone", "").is_err());
+    }
+    #[test]
+    fn existing_pc_alias_is_preserved_on_first_name_report() {
+        let store = crate::preferences::Store::memory();
+        let mut pairing = Pairing::with_store(store.clone()).unwrap();
+        let paired = pairing.pair_device(&pairing.code.clone(), None, "工作手机").unwrap().unwrap();
+        store.lock().unwrap().update(|p| p.devices[0].reported_name.clear()).unwrap();
+        assert_eq!(pairing.report_name(&paired.device_id, "Xiaomi 12S Pro", "2206122SC").unwrap(), "工作手机");
+        assert!(store.lock().unwrap().get().devices[0].name_customized);
+    }
     use super::*;
     #[test]
     fn credential_lifecycle() {

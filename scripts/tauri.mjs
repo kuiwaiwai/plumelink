@@ -1,7 +1,11 @@
 import { releaseRustEnv } from "./release-rust-env.mjs";
+import { verifyDesktopPermissions } from "./desktop-permissions.mjs";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { prepareUsbComponent } from "./prepare-usb.mjs";
+if (["build", "bundle", "dev"].includes(process.argv[2])) await prepareUsbComponent();
+if (["build", "bundle", "dev"].includes(process.argv[2])) verifyDesktopPermissions();
 const env = process.argv.includes("build") ? releaseRustEnv() : { ...process.env };
 const cargoBin = join(env.USERPROFILE || env.HOME || "", ".cargo", "bin");
 const pathKey =
