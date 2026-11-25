@@ -1,59 +1,70 @@
-# 手机麦克风与文件互传
+# Microphone and file transfers
 
-## 把手机当作麦克风
+[Overview](../README.md) · [Troubleshooting](TROUBLESHOOTING.md)
 
-先将手机与电脑配对，再根据想听到声音的位置选择设备。
+## Use the phone as a microphone
 
-手机「设置 → 手机麦克风 → 麦克风状态与帮助」可查看音频设备、电脑接收情况和最近提示；「更多」中也有入口。状态检查不会开启收音或播放测试音。已送往电脑音频设备不代表收音软件已经录音，仍需在该软件中选择对应录音端。
+Pair the devices, then open **Preferences → Phone microphone** on Windows to choose where the sound goes.
 
-在状态面板点击「开启持续收音」即可开始，点击「立即停止麦克风」结束。首次使用需要允许手机录音，授权后请再次开启麦克风，应用不会自动开始收音。遥控页也可长按麦克风说话，上滑停留一秒锁定；短按不会录音。
-
-| 用途 | 羽连电脑端「音频送往」 | 网站或收音软件中的麦克风 |
+| Use | Output in PlumeLink on Windows | Microphone in the receiving app |
 | --- | --- | --- |
-| 用电脑音箱或耳机试听 | 选择该音箱或耳机 | 无需设置 |
-| 用 VB-CABLE 把声音送进软件 | `CABLE Input` | `CABLE Output` |
-| 使用其他虚拟音频线路 | 选择线路的播放端 | 选择同一线路的录音端 |
+| Listen through PC speakers or headphones | Those speakers or headphones | No input selection needed |
+| Send audio into an app through VB-CABLE | `CABLE Input` | `CABLE Output` |
+| Use another virtual audio cable | Its playback endpoint | The same cable’s recording endpoint |
 
-如果要在网站上使用手机麦克风，可以这样设置：
+### Start and stop
 
-1. 在电脑端展开「手机麦克风」，点击「检测并配置麦克风」。电脑还没有虚拟线路时，可以在这里安装 VB-CABLE。
-2. 在网站上允许麦克风访问，并在网站的声音设置中选取对应录音端。如果网站跟随系统默认设备，把 Windows 默认输入设备设为该录音端。
-3. 在手机遥控页按住麦克风说话，观察网站的输入电平。首次使用需允许手机录音权限，然后再次按住。声音偏小时可在电脑端调高「麦克风增益」，出现增益过高提示或听到失真时调低。
+Hold the microphone button on the Remote page to talk. Releasing stops capture. To keep recording, slide up and hold for one second until the progress ring completes, then release. Stop with the on-screen button or the notification action. A short tap does not start recording.
 
-**松手会结束收音。** 想腾出手继续操作，按住麦克风向上滑动并停留一秒，等进度环完成后再松手。要结束持续收音，点手机上的停止按钮或通知中的停止操作。
+You can also start continuous recording from **Microphone status & help**, available in the phone’s microphone settings and More menu. On first use, grant Android’s recording permission, then start again; granting permission does not start capture automatically. Opening the status panel does not record or play a test tone.
 
-持续收音时仍可遥控电脑和传输文件。文件发送会为实时收音让出带宽，速度可能暂时降低；停止收音后会解除相应节流，无需重新开始传输。
+Remote control and file transfers remain available while recording. Transfers yield bandwidth to live audio and return to normal pacing when capture stops.
 
-如果能从扬声器听到声音，网站却没有输入，请按表格核对两端的选择。仍找不到录音端时，先停止收音，再到电脑端「连接诊断」检测通路，选用检测到提示音的录音设备。
+### Use the microphone on a website
 
-声音偏小时，可在电脑端「连接帮助 → 连接诊断」查看「Windows 设备音量」，点击「刷新设备状态」读取播放端和已确认录音端的音量与静音状态。未确认录音端时先检测通路；无法读取时检查 Windows 声音设置。设备音量、羽连的麦克风增益和收音软件的输入音量需要分别检查。
+1. On Windows, open **Preferences → Phone microphone** and run the detection and configuration action. Install VB-CABLE there if a virtual audio cable is needed.
+2. Route audio as shown in the table. Allow microphone access in the website and choose the corresponding recording endpoint. If the website follows the Windows default, set that endpoint as the default input.
+3. Start capture on the phone and check the website’s input level. Sound reaching the PC audio device does not mean the receiving app has started recording.
 
-也可先停止收音，在手机设置的「手机麦克风 → 收音模式」选择「语音增强」，再开启麦克风。手机支持时会启用系统自动增益和降噪；不支持的处理会跳过，仍可正常收音。声音不自然或背景噪声变大时，改回「标准收音」。标准模式保持原有采集方式；电脑端增益仍会生效，出现失真时应调低。
+If you hear the phone through the PC speakers but the website has no input, check both endpoint selections. Stop capture before running the audio route check in **Connection diagnostics**; it plays a test tone to identify the recording endpoint.
 
-手机显示「收音受限」时，检查系统麦克风隐私开关，以及通话、录音等正在使用麦克风的应用。解除占用后查看状态是否恢复；仍无声音时，停止收音再重新开启。连接或重连期间，也可以从通知中停止麦克风。
+### Volume and capture mode
 
-持续收音遇到短暂断流时会有限重试，反复断开后会停止并保留原因。修复连接和设备配置后，可在「麦克风状态与帮助」点击「重新开启持续收音」。该操作会重新开始录音；若没有显示这个按钮，先按页面提示处理电脑配置、录音权限或 USB 连接，再刷新状态。
+The PC’s microphone gain defaults to +6 dB and can be raised to +36 dB. Increase it gradually for quiet speech and reduce it if the sound clips or becomes distorted.
 
-遥控连接和音频连接分别显示状态。遥控断开时，已经开启的麦克风可能仍在收音，可随时停止；此时不会用旧数据判断电脑是否收到声音。USB 连接失效时，请在电脑「偏好设置 → USB 有线连接」重新连接手机。
+In **Connection help → Connection diagnostics**, refresh the Windows device status to inspect playback volume, the confirmed recording endpoint’s volume and mute state. Check the receiving app’s input level separately. If no recording endpoint has been confirmed, check the audio route first.
 
-## 把电脑上的文件保存到手机
+While stopped, choose **Speech enhanced** in the phone’s capture-mode setting to use system automatic gain and noise suppression where available. Unsupported processing is skipped. Choose **Standard** if enhancement sounds unnatural or raises background noise; PC gain applies to either mode.
 
-在电脑文件页选择文件，或把文件拖进共享区域。打开手机「文件」页，首次保存前在「Android 接收目录」选择一个文件夹并允许访问，然后保存所需文件。电脑端取消共享后，手机上已经保存的副本仍然保留。
+### Interruptions and recovery
 
-目录被删除、移走或访问权限失效时，进入或刷新手机文件页会重新检查目录，并暂停保存。点击「选择目录」重新授权后即可继续，无需重启应用。
+- **Capture restricted:** Check Android’s microphone privacy switch and other apps using the microphone, such as calls or recorders. Stop and restart capture if it does not recover after the conflict ends.
+- **Repeated disconnections:** Continuous capture retries briefly, then stops with a reason. Fix the connection or audio configuration before restarting from the status panel. This starts a new recording.
+- **Remote disconnected:** Audio and remote control have separate connection states. An active microphone may still be recording; use Stop at any time. Stale status is not treated as proof that the PC received audio.
+- **USB connection expired:** Reconnect the phone under **Preferences → USB connection** on Windows.
 
-## 把手机上的文件发到电脑
+## Save PC files to the phone
 
-在电脑文件页确认「Windows 接收目录」。在手机「文件」页选择文件，核对「待发送」列表和目标电脑后点击发送。也可在相册、文件管理器等应用中选择「分享 → 羽连」，然后选择电脑并确认发送。同名文件会另外命名。
+Choose files on the Windows file page or drop them into its sharing area. On the phone, open **Files**, choose an **Android download folder** and grant access before saving. Removing a shared file on the PC leaves copies already saved to the phone intact.
 
-每次最多选择 16 个文件，可在发送前移除单个文件或清空列表。收到分享时不会自动发送；已有传输进行时，新分享会保留在待发送列表中。
+Entering or refreshing the file page checks folder access. If the folder moved, was deleted or lost its permission, choose and authorize a folder again to resume saving.
 
-文件读取失败时，等来源应用恢复后点击「重新读取」。连接页会重读第一项失败文件，文件页也可单独重读某个文件；这只刷新文件信息，不会自动发送。仍无法读取时，请从来源应用重新选择或分享文件。
+## Send phone files to the PC
 
-电脑文件页的「手机发来的文件」显示接收进度和结果。需要中止时点击任务右侧的停止按钮；显示「正在保存」时仍需等待实际结果。已保存的文件可直接打开其所在目录，即使后来更换接收目录也会打开原位置。清空已结束记录不会删除文件。接收记录仅在本次电脑程序运行期间保留。
+Confirm the **Windows download folder** on the PC. Choose files on the phone’s Files page, review the pending list and target PC, then send. You can also use **Share → PlumeLink** from a gallery or file manager. Files with duplicate names are saved under separate names.
 
-单文件最大为 2 GB。传输中断时先恢复两端连接；如果任务已经结束，检查接收目录的可用空间和访问权限，再重新发送或保存。
+Select up to 16 files at a time and remove individual entries or clear the list before sending. Sharing does not send automatically. Shares received during a transfer stay pending for later confirmation.
 
-手机接收时会尽可能先写入临时文件，完整接收后再使用正式文件名。异常退出后，只清理由羽连登记的临时文件。同名的已有文件会保留。
+If reading a file fails, restore access in its source app and use the read-again action. This refreshes file information without sending it. If it still fails, select or share the file again from its source.
 
-如果接收目录不支持重命名，异常退出可能留下不完整文件。文件页会显示「未完成的接收」，可展开「查看详情」核对完整文件名和位置，再选择保留文件或确认删除。保存结果尚未确认时会单独提示，应先核对目录中的文件；删除确认会显示完整目标，删除前还会检查文件是否已变化。保留只移除这条记录，文件仍在原处。目录暂时无法访问时，可恢复访问后再处理。之后重新选择需要传输的文件。
+The Windows file page shows incoming progress and results. Use the task’s stop button to interrupt it; if saving has begun, wait for the actual result. Open a completed file’s folder to locate it, even after changing the receive folder. Clearing completed records does not delete files. PC receive history lasts only while PlumeLink is running.
+
+## Interrupted or incomplete transfers
+
+The limit is 2 GB per file. Restore the connection after an interruption. For an ended task, check free space and folder access before sending or saving again.
+
+Android writes to a temporary file when the destination supports it, then assigns the final name after receiving the complete file. Cleanup only targets temporary files registered by PlumeLink and retains existing files with the same name.
+
+If the destination cannot rename files, an unexpected exit may leave an incomplete file. Expand its details on the Files page to check its full name and location, then keep it or confirm deletion. Keeping removes the record while leaving the file in place. Deletion shows the full target and checks for changes before removing it. Restore folder access first if the destination is unavailable.
+
+An unconfirmed save result needs a directory check before retrying: saving can finish after a timeout or cancellation request. PlumeLink does not report it as cancelled or resend it automatically. See [Transfer troubleshooting](TROUBLESHOOTING.md#file-transfer-results).

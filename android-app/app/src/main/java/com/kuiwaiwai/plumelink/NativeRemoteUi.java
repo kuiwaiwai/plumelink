@@ -53,7 +53,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** Android views for the remote workspace. The existing session delivers state and receives actions. */
+/** Native remote views driven by session state and actions. */
 final class NativeRemoteUi {
     private static final int SHEET_GUTTER_DP = UiStyle.SHEET_GUTTER;
     private static final int MORE_GAP_DP = 8;

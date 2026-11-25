@@ -1,4 +1,40 @@
-# 羽连 PlumeLink · 隐私政策 / 隱私政策 / Privacy policy
+# PlumeLink privacy policy
+
+## English
+
+Effective November 25, 2026. This policy applies to the PlumeLink Android and Windows apps maintained by kuiwaiwai.
+
+### Connection and remote control
+
+PlumeLink requires no account and includes no ads, analytics or usage reporting to the maintainer. Devices on the local network can see the computer’s advertised service name and connection details, including its address. The phone and selected PC exchange pairing information, device names, device identifiers and credentials and communicate over an encrypted connection after certificate confirmation. The phone sends remote commands and typed text to the PC. A phone with remote control permission can see window titles, app names and icons. Typed text goes to whichever program is receiving input on the PC. App and folder shortcut paths stay on the PC. A phone with remote control permission can see shortcut names, types, icons and availability and open the configured apps or folders. Remove shortcuts in Preferences on the PC.
+
+### Optional permissions and sharing
+
+USB connections use Android Platform-Tools on your PC to create a data-cable channel. The PC reads connected device names, models, debugging authorization states and connection identifiers only to list phones and maintain your selected connections; this information stays in memory. A component path you select is stored only on the PC. PlumeLink can open its Android app on the selected phone, but does not install apps, unlock the phone or enable USB debugging for you. Initial PC confirmation and pairing are still required, with the same feature permissions.
+
+The PC keeps a bounded set of launch request identifiers and states in memory to return results and avoid duplicate launches. They are not written to an operation history file. Only the requesting device, while it still has remote control permission, can query its results.
+
+The camera reads pairing codes on the phone. When you start the microphone, audio streams to the selected audio device on your PC. Locked microphone streaming can continue in the background until you stop it or the connection ends. PlumeLink does not save recordings. Other audio software on the PC may record under its own settings. Authorized devices can see shared file names and sizes. Sending or saving a file transfers its contents. The Android file picker grants access to the files or folder you select. You can deny camera or microphone access and revoke either permission in Android settings.
+
+When you share files to PlumeLink through Android, it uses temporary read access from the source app and displays file names, sizes and a pending list locally. Files are sent to the selected PC only after you confirm. Clearing the list removes the pending selection. Android may retain the selection in interface restoration state when rebuilding the screen. PlumeLink does not create a content cache for pending files or upload this information to the maintainer.
+
+A phone with microphone permission can view the PC's audio output configuration, gain and its own reception status. If another phone occupies the channel, only its occupied status is shown; that phone's name, levels and errors are not returned. Checking status does not start recording. The latest capture issue remains in the current interface state so you can review or dismiss it.
+
+### Storage, removal and access controls
+
+Shortcut plan names, their three actions and icons are stored locally on the phone for each PC. Plan configurations are not synced to the PC or uploaded to the maintainer and are removed when you remove the corresponding saved PC on the phone.
+
+The phone stores PC addresses, certificate fingerprints, pairing credentials and preferences in private app storage. Android system backup is disabled for the app. During transfers, the phone also stores local task status. Download records include file names, sizes and receiving locations so interrupted files can be checked and cleaned up. These records are removed when the task completes or you resolve the record. They are not sent to the maintainer. Windows stores authorization digests, permissions, settings and TLS credentials in the current user’s local application data. Diagnostic logs rotate daily on the PC and are limited to seven files. Revoke a phone from the paired devices on the PC and remove a saved PC on the phone. You can clear Android app data. To clear Windows settings, exit the app and delete the com.kuiwaiwai.plumelink folder under local application data. Files already received remain on each device until deleted separately.
+
+When finding a new address for the same PC, unsent text may be held temporarily in memory so you can continue editing after reconnecting. It is not written to disk or sent automatically.
+
+Windows receive history is kept only in memory while the app is running, with up to 32 records containing file names, sizes, source devices and receiving locations. It is discarded when the app exits. Clearing records does not delete saved files. This information is not uploaded to the maintainer.
+
+After you change the receiving folder, the app releases folder permissions it no longer needs. Active downloads and unfinished files awaiting your decision retain the access they need. Releasing access does not delete files.
+
+### Third parties and contact
+
+Windows setup may contact Microsoft to install WebView2 if needed. If you choose to install VB-CABLE, the app uses the bundled driver files when available and otherwise downloads them from VB-Audio. Download providers receive request information such as your network address under their own privacy policies. For privacy questions, deletion assistance or feedback, contact kuiwaiwai through Issues in the kuiwaiwai/plumelink GitHub repository. Keep pairing codes, tokens, private text and files out of public reports. Updates to this policy carry a revised date in the apps and source distribution.
 
 ## 简体中文
 
@@ -71,39 +107,3 @@ Windows 接收記錄僅保存在目前程式的記憶體中，最多顯示 32 �
 ### 第三方與聯絡方式
 
 如需安裝 WebView2，Windows 安裝程式可能連線至微軟；由你主動安裝 VB-CABLE 時，應用程式優先使用隨附的驅動程式檔案，未附帶驅動程式時會向 VB-Audio 下載。下載服務可收到網路位址等請求資訊，適用提供者的隱私權政策。隱私問題、刪除協助或政策意見可透過 GitHub 儲存庫 kuiwaiwai/plumelink 的 Issues 聯絡維護者。請勿公開配對碼、權杖、檔案或私人輸入。政策更新時將在應用程式與原始碼中同步更新日期及內容。
-
-## English
-
-Effective November 25, 2026. This policy applies to the PlumeLink Android and Windows apps maintained by kuiwaiwai.
-
-### Connection and remote control
-
-PlumeLink requires no account and includes no ads, analytics or usage reporting to the maintainer. Devices on the local network can see the computer’s advertised service name and connection details, including its address. The phone and selected PC exchange pairing information, device names, device identifiers and credentials and communicate over an encrypted connection after certificate confirmation. The phone sends remote commands and typed text to the PC. A phone with remote control permission can see window titles, app names and icons. Typed text goes to whichever program is receiving input on the PC. App and folder shortcut paths stay on the PC. A phone with remote control permission can see shortcut names, types, icons and availability and open the configured apps or folders. Remove shortcuts in Preferences on the PC.
-
-### Optional permissions and sharing
-
-USB connections use Android Platform-Tools on your PC to create a data-cable channel. The PC reads connected device names, models, debugging authorization states and connection identifiers only to list phones and maintain your selected connections; this information stays in memory. A component path you select is stored only on the PC. PlumeLink can open its Android app on the selected phone, but does not install apps, unlock the phone or enable USB debugging for you. Initial PC confirmation and pairing are still required, with the same feature permissions.
-
-The PC keeps a bounded set of launch request identifiers and states in memory to return results and avoid duplicate launches. They are not written to an operation history file. Only the requesting device, while it still has remote control permission, can query its results.
-
-The camera reads pairing codes on the phone. When you start the microphone, audio streams to the selected audio device on your PC. Locked microphone streaming can continue in the background until you stop it or the connection ends. PlumeLink does not save recordings. Other audio software on the PC may record under its own settings. Authorized devices can see shared file names and sizes. Sending or saving a file transfers its contents. The Android file picker grants access to the files or folder you select. You can deny camera or microphone access and revoke either permission in Android settings.
-
-When you share files to PlumeLink through Android, it uses temporary read access from the source app and displays file names, sizes and a pending list locally. Files are sent to the selected PC only after you confirm. Clearing the list removes the pending selection. Android may retain the selection in interface restoration state when rebuilding the screen. PlumeLink does not create a content cache for pending files or upload this information to the maintainer.
-
-A phone with microphone permission can view the PC's audio output configuration, gain and its own reception status. If another phone occupies the channel, only its occupied status is shown; that phone's name, levels and errors are not returned. Checking status does not start recording. The latest capture issue remains in the current interface state so you can review or dismiss it.
-
-### Storage, removal and access controls
-
-Shortcut plan names, their three actions and icons are stored locally on the phone for each PC. Plan configurations are not synced to the PC or uploaded to the maintainer and are removed when you remove the corresponding saved PC on the phone.
-
-The phone stores PC addresses, certificate fingerprints, pairing credentials and preferences in private app storage. Android system backup is disabled for the app. During transfers, the phone also stores local task status. Download records include file names, sizes and receiving locations so interrupted files can be checked and cleaned up. These records are removed when the task completes or you resolve the record. They are not sent to the maintainer. Windows stores authorization digests, permissions, settings and TLS credentials in the current user’s local application data. Diagnostic logs rotate daily on the PC and are limited to seven files. Revoke a phone from the paired devices on the PC and remove a saved PC on the phone. You can clear Android app data. To clear Windows settings, exit the app and delete the com.kuiwaiwai.plumelink folder under local application data. Files already received remain on each device until deleted separately.
-
-When finding a new address for the same PC, unsent text may be held temporarily in memory so you can continue editing after reconnecting. It is not written to disk or sent automatically.
-
-Windows receive history is kept only in memory while the app is running, with up to 32 records containing file names, sizes, source devices and receiving locations. It is discarded when the app exits. Clearing records does not delete saved files. This information is not uploaded to the maintainer.
-
-After you change the receiving folder, the app releases folder permissions it no longer needs. Active downloads and unfinished files awaiting your decision retain the access they need. Releasing access does not delete files.
-
-### Third parties and contact
-
-Windows setup may contact Microsoft to install WebView2 if needed. If you choose to install VB-CABLE, the app uses the bundled driver files when available and otherwise downloads them from VB-Audio. Download providers receive request information such as your network address under their own privacy policies. For privacy questions, deletion assistance or feedback, contact kuiwaiwai through Issues in the kuiwaiwai/plumelink GitHub repository. Keep pairing codes, tokens, private text and files out of public reports. Updates to this policy carry a revised date in the apps and source distribution.

@@ -1,83 +1,85 @@
-# 连接遇到问题
+# Troubleshooting
 
-## USB 连接
+[Overview](../README.md) · [Devices and permissions](SECURITY.md) · [Microphone and files](REMOTE-AUDIO-TRANSFERS.md)
 
-电脑安装版内置 USB 连接组件，无需手动安装或选择路径。「偏好设置 → USB 有线连接」会列出手机。连接类型未提供时，请根据提示选择通过数据线连接的手机。
+## USB connection
 
-提示内置组件缺失或无法运行时，请重新安装电脑端羽连，并检查安全软件是否隔离了安装目录中的文件。检测暂时失败不代表正在使用的通道已断开。
+The Windows installer includes the USB component. Open **Preferences → USB connection** to detect and connect a phone. If connection types are unavailable, choose the phone attached by a data cable; the list may also contain wireless devices or emulators.
 
-首次检测会自动启动内置 USB 后台服务。提示启动失败时，请检查安全软件是否拦截；提示后台服务未正常响应时，先退出其它手机助手或模拟器，再重新检测。羽连不会强制关闭其它程序的后台服务。
+| What you see | What to try |
+| --- | --- |
+| Component missing or unable to run | Reinstall PlumeLink on Windows and check whether security software quarantined files from its installation directory |
+| Background service cannot start | Check security software; close other phone-management tools or emulators and detect again |
+| Background service does not respond or is incompatible | Exit programs using another ADB version and detect again; restart the PC if needed. PlumeLink does not force-stop a shared ADB service |
+| No phone found | Try a data-capable cable and another USB port, enable USB debugging and install the phone manufacturer’s USB driver if Windows does not recognize it |
+| Waiting for authorization | Unlock the phone and approve this PC in Android’s USB debugging prompt |
+| PlumeLink is not open on the phone | Install the Android app, unlock the phone and connect again |
+| USB channel ready, but not paired | Complete certificate confirmation and pairing on the phone. The channel alone does not grant access; check authorization under Devices on the PC |
+| USB connection expired | Connect the phone again in the PC’s USB panel to update its endpoint. Saved pairing and the wireless address are retained |
+| USB endpoint occupied | Disconnect other USB remote-control tools, then retry. PlumeLink does not overwrite their channels |
+| Cable disconnected | Reconnect and confirm Android’s authorization. The PC restores phones selected in its current session; after restarting the app, select the phone again |
+| Cleanup incomplete | Automatic recovery for that phone is cancelled. Keep PlumeLink running, reconnect the cable and detect again so cleanup can finish |
+| Connection result unconfirmed | Detect again, then connect that phone. PlumeLink retires the uncertain endpoint and uses a fresh one without interrupting other phones |
 
-需要进一步定位时，可在安装目录的终端中运行 `PlumeLink.exe --verify-usb-connection`。输出区分组件、后台服务和设备列表三个阶段，仅包含版本、状态与设备数量，不输出手机序列号或配对信息。
+For multiple phones, each address under a phone belongs to its own USB endpoint. Compare that address during certificate verification. Disconnecting one phone leaves the others available; stopping all services disconnects every session. An offline phone can be disconnected individually to cancel its automatic recovery.
 
-- 没有发现手机：换一条支持数据传输的数据线或 USB 接口，在手机开发者选项中开启 USB 调试。Windows 未识别手机时，安装手机厂商提供的 USB 驱动。
-- 使用其它程序启动的旧版后台服务时，羽连会兼容读取设备列表。若组件无法区分连接类型，列表会明确提示可能包含无线设备和模拟器；请选择通过数据线连接的手机。若提示后台组件版本不兼容，先退出使用旧版 ADB 的程序，再重新检测；仍未恢复时可重启电脑。羽连不会强制重启其它程序正在使用的 ADB 服务。
-- 等待授权：解锁手机，并在系统提示中允许这台电脑进行 USB 调试。羽连不会替你开启调试或解除锁屏。
-- 手机没有打开羽连：先安装 Android 版羽连并解锁手机，再点击连接。首次使用时，核对手机证书与电脑 USB 区域中的地址、指纹，并输入该区域的配对码。
-- 显示「USB 通道已就绪」但未配对：这只代表数据线通道已建立。请完成手机上的确认和配对；授权状态以电脑「设备管理」为准。
-- 提示「USB 连接已失效」：在电脑「偏好设置 → USB 有线连接」中重新为该手机点击「连接」。电脑端重启或更换入口后，旧地址不能继续使用；重新连接会更新手机的有线入口，原有配对和无线地址保留。
-- USB 入口被占用：先断开其它 USB 遥控工具，再重试。羽连不会覆盖其它工具创建的通道，也不会关闭共享的 ADB 服务。
-- 数据线断开：重新插接并确认手机授权。电脑端保留本次选择时会恢复通道；已断开的遥控操作不会补执行。更换电脑或重启电脑羽连后，请重新选择手机。
-- 提示连接清理未完成：该手机已取消自动恢复，羽连会继续尝试清理本次留下的通道。保持电脑羽连运行，重新插接并允许 USB 调试，也可点击「重新检测」。其它手机和无线连接可继续使用。
-- 提示连接结果尚未确认：点击「重新检测」后，再为该手机点击「连接」。羽连会停止无法确认的入口，重试时使用新的入口；不会把仍有疑问的通道当成连接成功。其它正常连接的手机不受影响。
-- 多台手机同时使用 USB：每台手机下方的地址对应它的有线入口。核对证书时选择与手机显示一致的地址；配对码和电脑证书共用。点击某台手机的「断开」只停止该手机的有线会话，停止全部服务会断开所有连接。
-- 某台手机恢复失败：查看该手机下方的提示，其它手机可以继续使用。离线手机仍可单独点击「断开」取消自动恢复；重新检测成功后，过期的检测错误会消失。
+USB does not require shared Wi-Fi or USB tethering. To use Wi-Fi instead, choose the wireless action from the saved PC’s menu on the phone. Microphone output still needs configuration under **Preferences → Phone microphone** on Windows.
 
-使用无线连接时，在手机已保存电脑的菜单中选择「通过无线连接」。USB 连接不需要同一 Wi-Fi，也不需要开启 USB 网络共享。麦克风仍需在电脑「偏好设置 → 手机麦克风」配置音频设备。
+For component diagnostics, run `PlumeLink.exe --verify-usb-connection` from a terminal in its installation directory. The output distinguishes component, background-service and device-list status without printing phone serial numbers or pairing data. A failed check alone does not mean an active channel has disconnected.
 
-## 手机上找不到电脑
+## Cannot find or reach the PC
 
-1. 打开电脑端的「连接诊断」，确认服务已启动，电脑处于唤醒状态。
-2. 让手机和电脑连接同一可信网络。电脑可以插网线。如果手机连的是访客 Wi-Fi，请换到允许设备互访的网络。
-3. 在手机上扫描电脑端的二维码，或手动输入电脑显示的地址和端口。默认端口为 `17840`。只要能手动连接，就可以继续使用这台电脑。
+1. Open **Connection diagnostics** on Windows. Check that the service is running and the PC is awake.
+2. Connect both devices to the same trusted local network. The PC can use Ethernet. Avoid guest Wi-Fi that prevents devices from reaching one another.
+3. Scan the PC’s QR code or enter its displayed address and port manually. The default port is `17840`. Manual connection works even when discovery is unavailable.
 
-如果扫码或手动连接也超时，请检查羽连选择的是否为电脑实际联网的 Wi-Fi 或以太网地址。若 Windows 防火墙询问是否允许连接，只在可信网络上放行。端口被其他程序占用时，可在「偏好设置 → 连接设置」更换端口，应用成功后重新扫码。
+If connection still times out, check the selected Wi-Fi or Ethernet adapter on the PC. Allow PlumeLink through Windows Firewall on your trusted network. If another application uses the port, change it under **Preferences → Connection settings**, apply successfully and scan again.
 
-如果更换安装目录后仍然连不上，可以右键点击 Windows 安装包，选择「以管理员身份运行」并覆盖安装。安装程序会为当前目录下的 `PlumeLink.exe` 设置防火墙规则，允许来自本地子网、使用专用或域网络的 TCP 连接。
+After changing installation directories, run the installer as administrator to refresh the firewall rule if needed. The rule targets `PlumeLink.exe` in that directory and permits local-subnet TCP traffic on private or domain networks.
 
-电脑地址或端口变化后，手机发现同一台电脑的新地址时，会在已保存的电脑行中显示「发现新地址」。点击后会先核验电脑，再更新保存记录；也可重新扫码。只有证书和电脑身份一致时，才会沿用原有配对与快捷配置。发现记录暂时消失时，列表会恢复显示原地址，不会删除配对。
+When discovery finds a new address for a saved PC, select it to verify the certificate and identity before updating the address. Only a matching identity and certificate retain the pairing and shortcuts. Scanning again also works. Losing a discovery result does not delete the saved pairing.
 
-已配对的无线连接持续重连时，可点击遥控页右上角的电脑状态，在连接面板中选择「查找并重新连接」。羽连会在附近查找同一台电脑并核对原证书，只有核对一致时才更新连接。请先停止收音并等待文件传输结束；未发送的文字会留作草稿，旧遥控操作不会补执行。找不到时可继续重试原地址，或回到电脑列表扫码连接。此入口不用于 USB 连接。
+For a paired wireless PC stuck reconnecting, tap its status on the Remote page and choose **Find and reconnect**. Stop recording and finish file transfers first. PlumeLink looks for the same PC and checks its saved certificate before updating the connection. Unsent text stays as a draft; previous remote input is not replayed. If it cannot find the PC, retry the address or return to the PC list. Use the USB panel for wired connections.
 
-## 配对码无效，或手机提示证书变化
+## Pairing code or certificate warning
 
-配对码默认每 15 分钟更新，成功配对后也会更换。输入电脑现在显示的六位数字；连续输错后请等一分钟再试。
+Pairing codes refresh every 15 minutes by default and after successful pairing. Enter the six digits currently displayed on the PC. After repeated incorrect attempts, wait a minute before retrying. The interval can be changed in connection settings.
 
-电脑端卸载重装并清除配置后，电脑身份或证书可能变化。Android 会在当前连接中提示重新核对：请与电脑端核对地址和证书指纹，确认后重新配对此电脑，无需重置其它电脑的信任记录。取消会保留原有配对。仅更换 Wi-Fi、电脑地址或正常覆盖更新通常不会更换证书；如果没有重装或更换电脑，请取消连接并检查地址。
+Reinstalling the PC app and clearing its settings may change its certificate or identity. Android asks you to compare the address and fingerprint with the PC and pair again. You do not need to reset trust for other PCs. Cancelling preserves the original pairing. Ordinary updates or network changes generally retain the certificate; if no reinstall or PC change was expected, cancel and check the address.
 
-## 已经连接，但电脑没有响应
+## Connected, but controls do not respond
 
-- **鼠标或键盘无响应**：在电脑「设备管理」中检查手机的遥控权限。若启用了主控模式，请确认主控设备是哪台手机。
-- **发送文字没有显示**：检查文字输入权限，并先在电脑上点一下目标输入框。
-- **只有管理员窗口无法操作**：在电脑端的「设备管理」检查这台手机的管理员控制权限和所需的遥控或文字权限。如果辅助进程尚未就绪，点击「请求 Windows 授权」并在电脑上确认。[设备与权限](SECURITY.md)
-- **播放器不响应**：先点击播放器窗口。羽连的播放键发送空格，前进和后退发送方向键，播放器需支持这些快捷键。
+| Problem | Check |
+| --- | --- |
+| Pointer or keys do nothing | Remote-control permission under Devices on Windows, and which phone has control in primary mode |
+| Text does not appear | Text permission and whether the intended input field is focused on the PC |
+| Only elevated windows ignore input | Administrator-control permission, the required remote or text permission, and Windows approval for the helper. See [Devices and permissions](SECURITY.md#elevated-windows-applications) |
+| Playback buttons do nothing | Focus the player. The remote’s play button sends Space and its seek buttons send arrow keys; the player must support them. System media actions require Windows media-key support |
 
-## 手机锁屏或切后台后断线
+## Connection stops in the background
 
-应用提示无法保持收音或传输时，请回到羽连后重新开始。检查系统是否允许羽连使用麦克风、显示通知和在后台运行；已锁定的持续收音和正在传输的文件可以在后台继续，触控与按键会在离开页面时释放，返回后不会重放旧输入。
+**Keep app running** in the phone’s display settings is on by default. While connected, a native foreground service maintains the connection and shows a notification. Turning it off pauses remote control when leaving the app. Touches and keys release on leaving; returning starts a fresh session without replaying old input.
 
-如果提示文件或麦克风权限已关闭，请在电脑端「设备管理」中为该手机重新开启对应权限，再手动重试；无需删除原有配对。
+If the connection stops after a longer screen-off period, open **Background settings**, allow background use and choose an unrestricted battery policy. Some phones also require autostart permission. Deep power saving, force-stopping the app or loss of network access can interrupt the connection. Keep both apps up to date.
 
-手机「设置 → 显示」中的「应用保活」默认开启。连接电脑后，原生前台服务在息屏或切到后台时维护连接，并显示常驻通知；触控与按键会安全释放，返回时建立新的输入会话。关闭保活后，离开应用会暂停遥控连接。手机和电脑端应同时更新。
+Locked continuous capture and active file transfers can continue in the background when Android permits them. Check microphone, notification and background permissions. If the foreground service could not start, remove the system restriction and toggle keep-alive off and on. Return to PlumeLink to restart a task that stopped. If the PC revoked file or microphone access, enable that device’s permission on Windows before retrying; pairing can be retained.
 
-若息屏较长时间后仍断线，点击同一区域的「后台运行设置」，允许羽连后台运行，并将电池策略设为「不限制」或「无限制」。部分手机还需允许自启动。系统深度省电、强行停止应用或断开网络仍可能中断连接；回到羽连后会重新连接，不补发旧操作。提示后台服务未能启动时，请先解除系统限制，再关闭并重新开启保活。如果电脑已经关机，可以直接回到电脑列表选择另一台。
+You can return to the PC list and choose another computer even if the previous one is offline.
 
-## 快捷启动提示失败
+## Quick launch fails or has no confirmed result
 
-应用或文件夹已移动、删除时，在电脑「偏好设置 → 遥控设置 → 电脑快捷入口」中重新添加，再刷新手机列表。若提示「结果未确认」，先在电脑上检查是否已经打开；羽连不会自动重发这次操作。发生错误后的状态核查不会阻止刷新列表，不必重新连接或重启应用。
+If an app or folder moved or was deleted, update it under **Preferences → Remote control settings → PC shortcuts** on Windows and refresh the phone’s list. An unconfirmed result means you should check whether it opened on the PC before retrying; the launch is not automatically repeated.
 
-显示「正在打开」时可以关闭抽屉继续遥控。电脑已有启动请求未完成时，会提示稍后再试；准备阶段超时或被取消的请求不会在之后补执行。已经进入 Windows 启动过程但未返回结果时，会提示结果未确认。
+You can close the sheet while a launch is pending. Another pending request may require waiting. Requests cancelled or timed out during preparation do not run later; a request already handed to Windows may need its result checked. A failed status check does not prevent refreshing the list or require restarting the app.
 
-## 电脑从睡眠中恢复
+## PC wakes from sleep
 
-手机会重新建立遥控连接，配对无需重做。睡眠前的触摸、按键和排队操作会清空，请在连接恢复后重新操作。若有线连接仍未恢复，在电脑「偏好设置 → USB 有线连接」中重新检测手机。
+The phone starts a fresh remote session and retains pairing. Earlier touches, keys and queued actions are discarded. Wait for the connection before controlling the PC again. For USB, detect and reconnect the phone in the PC’s USB panel if needed.
 
-## 取消发送文件后提示结果待确认
+## File transfer results
 
-文件可能正在完成保存。羽连会短暂查询实际结果：已经保存的文件保留，尚未保存的文件取消。若连接中断而无法确认，请先到电脑接收目录查看，再决定是否重发；不会自动继续发送批量任务的下一个文件。
+**Cancellation result unconfirmed:** A file may already be finishing its save. PlumeLink briefly checks the result, retaining completed files and cancelling files not yet saved. If the connection prevents confirmation, inspect the receive directory before resending. The next file in a batch is not sent automatically.
 
-## 文件位置长时间没有响应
+**Receive folder does not respond:** Cancel the task and choose another location, such as internal storage. An unavailable cloud provider, memory card or file manager may still be processing the original operation; wait before retrying rather than starting it repeatedly.
 
-云盘、存储卡或文件管理器暂时不可用时，可以取消本次传输，先选择手机内部存储等其它位置。原位置仍在处理时会提示稍后重试，不会反复启动同一个操作。
-
-若提示保存结果尚未确认，请先检查电脑接收目录或 Android 所选目录，再决定是否重发。已经开始保存的操作可能晚于提示完成，羽连不会把这种情况当作已取消，也不会自动重发文件。
+**Save result unconfirmed:** Check the selected directory before sending or saving again. A write can finish after the timeout message. PlumeLink does not treat this as confirmed cancellation or automatically resend the file.

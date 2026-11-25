@@ -5,9 +5,11 @@ edition = "2021"
 rust-version = "1.81"
 description = "Allocation-free causal transmission kernel for bounded additive control intents"
 license = "MIT"
+repository = "https://github.com/kuiwaiwai/plumelink"
+readme = false
 keywords = ["transport", "no-std", "realtime", "protocol", "control"]
 categories = ["network-programming", "no-std", "embedded"]
-include = ["src/**", "docs/APPLICATION.md", "docs/DESIGN.md", "docs/INTEGRATION.md", "docs/PROTOCOL.md", "Cargo.toml", "Cargo.lock", "README.md", "README.en.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md"]
+include = ["src/**", "Cargo.toml", "Cargo.lock", "LICENSE", "THIRD_PARTY_NOTICES.md"]
 
 [lib]
 path = "src/lib.rs"

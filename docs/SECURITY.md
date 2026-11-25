@@ -1,34 +1,44 @@
-# 设备与权限
+# Devices and permissions
 
-在可信的局域网中使用羽连。首次配对时，先核对手机显示的地址与电脑端是否一致，再确认信任。请勿公开配对码或将服务端口映射到公网。
+Use PlumeLink on a trusted local network. Compare the phone’s connection address and certificate fingerprint with the PC before trusting it. Keep pairing codes private and do not forward the service port to the internet.
 
-附近发现仅提供连接候选。手机在发送配对凭据前核对电脑证书和身份，确认成功后才更新保存的地址。更换 IP 或端口不会自动信任不同的证书。电脑身份或证书变化时，Android 会要求重新核对；取消会保留原配对，确认后清理该电脑的旧配对凭据并要求重新配对，不会把旧令牌发送给新证书对应的电脑。其它已信任电脑的记录不受影响。电脑的身份查询返回服务类型、协议版本和设备标识；有线入口另有当前通道的凭据摘要，不返回凭据本身、配对信息或操作权限。
+## Pairing and PC identity
 
-## 谁能操作这台电脑？
+Nearby discovery provides connection candidates. The phone checks the PC’s certificate and identity before sending pairing credentials or updating a saved address. A different IP address or port does not automatically authorize a different certificate.
 
-USB 连接使用 ADB 反向通道承载同一套 HTTPS、配对及设备权限。USB 调试授权是 Android 的系统授权，不代替羽连配对。电脑只在本机回环地址打开 USB 入口；该入口与无线监听分别核对来源，共享权限和会话编号。手机按电脑身份与证书保存配置，不把共用的回环地址当作电脑身份。
+If reinstalling the PC app clears its settings, its identity or certificate may change. Android asks you to verify the PC again. Cancelling preserves the original pairing; confirming removes that PC’s old credentials and requires fresh pairing. Old tokens are not sent to the new certificate, and other saved PCs are unaffected. If you did not reinstall or change the PC, cancel and check the address.
 
-每个 USB 入口使用独立的随机连接凭据。重启电脑端或更换入口后，旧凭据不能访问新入口，即使地址或端口被复用。手机先核对通道摘要及电脑证书、身份，再使用该凭据；通道过期不会清除已配对电脑和无线地址。连接凭据不替代设备权限。
+The identity endpoint exposes the service type, protocol version and device identifier. A USB endpoint also exposes a digest for verifying its current channel credential. It does not expose the credential itself, pairing data or permissions.
 
-打开 Windows 端的「设备管理」，可以查看已配对的手机，并分别设置权限。
+## USB connections
 
-| 权限 | 手机可以做什么 |
+USB uses an ADB reverse channel with the same HTTPS, pairing and device permissions. Android’s USB debugging approval does not replace PlumeLink pairing. The PC opens USB endpoints only on its loopback interface and validates them separately from wireless requests.
+
+Each USB endpoint has an independent random connection credential. Restarting the PC app or replacing the endpoint invalidates it, even if an address or port is reused. The phone verifies the channel digest, PC identity and certificate before using that credential. Expiry preserves the saved PC and its wireless address. The shared loopback address is not used as the PC’s identity.
+
+## Device permissions
+
+Open **Devices** on Windows to inspect paired phones and change their permissions.
+
+| Permission | Allowed actions |
 | --- | --- |
-| 遥控 | 移动指针、点击、使用按键，查看并切换电脑窗口 |
-| 管理员控制 | 在管理员窗口使用本设备已获准的遥控或文字功能。默认开启，可单独关闭 |
-| 文字 | 将手机输入的文字发送到电脑当前输入框 |
-| 文件 | 保存电脑已共享的文件，或向电脑的接收目录发送文件 |
-| 麦克风 | 把手机采集的声音送到电脑选定的音频设备，查看音频配置和本设备的收音状态 |
-| 关机 | 请求关闭电脑。此权限默认关闭，使用时还要在手机上确认身份 |
+| Remote control | Move the pointer, click, send keys, list windows and switch between them |
+| Administrator control | Use the device’s permitted remote-control or text actions in elevated windows; enabled by default and independently revocable |
+| Text | Send text to the focused PC input field |
+| Files | Save files shared by the PC and send files to its receive folder |
+| Microphone | Send audio to the selected PC device and inspect configuration and this phone’s recording status |
+| Shutdown | Request a shutdown; disabled by default and requires identity confirmation on the phone |
 
-多台手机同时在线时，自由模式允许获授权的手机共同操作；主控模式可以指定其中一台操作。借给别人的手机不再需要访问时，请在「设备管理」里撤销该设备。仅刷新配对码会保留已经配对的设备。
+Free mode lets authorized phones share control. Primary mode assigns control to a selected phone. Revoke a phone when it should no longer have access. Refreshing the pairing code retains existing paired devices.
 
-麦克风状态查询不会返回另一台手机的名称、电平或错误，只提示通道是否被占用。
+Microphone status queries do not disclose another phone’s name, audio level or error details; they only indicate that the channel is occupied.
 
-## 操作管理员窗口
+## Elevated Windows applications
 
-「设备管理」中的管理员控制权限按设备保存。新配对设备默认开启，已配对设备升级后也默认开启。可以在设备离线时修改；重连和电脑端重启后会沿用上次的设置。
+Administrator-control permission is enabled by default and saved per device. It can be changed while a device is offline and persists across reconnection and PC app restarts.
 
-手动打开羽连时，Windows 会请求批准本机管理员辅助进程。随系统登录在后台启动时，首次打开主窗口才会请求。取消后仍可使用普通遥控，也可在「设备管理」中点击「请求 Windows 授权」。暂停辅助进程会暂停所有设备的管理员控制，设备权限仍会保留。锁屏和 UAC 确认界面需要在电脑本机操作。
+Opening PlumeLink manually requests Windows approval for a local elevated helper. When the app starts in the background at sign-in, it requests approval when you first open its main window. Cancelling leaves ordinary remote control available. Use **Request Windows approval** in **Devices** to request approval again.
 
-如需删除已保存的配对信息或了解数据保存位置，请参阅[隐私政策](../PRIVACY.md)。
+Pausing the helper pauses administrator control for every device while preserving their permissions. The Windows lock screen and UAC confirmation screen must be handled locally on the PC.
+
+For stored data and removal, see the [Privacy policy](../PRIVACY.md).

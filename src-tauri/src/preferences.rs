@@ -193,7 +193,7 @@ fn deserialize_service_port<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preferences {
-    /// Legacy single-device credential, imported into `token_digests` on load.
+    /// Single-device credential input, normalized into `token_digests` on load.
     #[serde(skip_serializing)]
     pub token_digest: Option<String>,
     #[serde(skip_serializing)]
@@ -217,7 +217,7 @@ pub struct Preferences {
     /// Default capture endpoints recorded before 「设为默认录音设备」, by role.
     pub audio_default_restore: Vec<String>,
     pub halo: HaloSettings,
-    /// Accepted only so installations that once stored updater settings can migrate.
+    /// Ignored on input and omitted from saved configuration.
     #[serde(skip_serializing, rename = "updates")]
     legacy_updates: Option<serde_json::Value>,
     /// DER-encoded self-signed device certificate and PKCS#8 key.

@@ -9,7 +9,7 @@ import android.graphics.drawable.Drawable;
 import androidx.core.graphics.PathParser;
 import java.util.HashMap;
 
-/** Lucide outlines shared with the web interface (ISC license, see THIRD_PARTY_NOTICES). */
+/** Lucide outlines (ISC license; see THIRD_PARTY_NOTICES.md). */
 final class NativeIcon extends Drawable {
     private static final HashMap<String, Path> PATHS = new HashMap<>();
     private final Path path;
